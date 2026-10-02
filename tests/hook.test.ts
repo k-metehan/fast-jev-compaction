@@ -3,6 +3,7 @@ import {
   compactSession,
   decisionLog,
   decisionLogLines,
+  register,
   resolveHookConfig,
   summarize,
   toSessionMessages,
@@ -145,5 +146,23 @@ describe('compactSession', () => {
     await expect(
       compactSession(transcript(), { ...config, apiKey: 'k' }, async () => ({ status: 500, ok: false, text: 'x' })),
     ).rejects.toThrow(/500/);
+  });
+});
+
+describe('session.compact hook', () => {
+  it('logs only the outcome, not one line per decision', async () => {
+    const handlers: Record<string, Function> = {};
+    register(((name: string, h: Function) => { handlers[name] = h; }) as never, { preserveRecentMessages: 1 } as never);
+    const fetch = jevFetch(() => 0.1);
+    const logs: string[] = [];
+    const $ = {
+      env: { get: async () => 'k' },
+      settings: { read: async () => ({}) },
+      http: { fetch: async (url: string, init?: { body?: string }) => fetch(url, init) },
+      ui: { log: (t: string) => logs.push(t), toast: () => {} },
+    };
+    await handlers['session.compact']($, { messages: transcript() }, async () => ({}));
+    expect(logs).toHaveLength(1);
+    expect(logs[0]).toMatch(/^(kept|fallback)/);
   });
 });

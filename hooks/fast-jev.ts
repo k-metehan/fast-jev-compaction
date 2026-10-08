@@ -620,9 +620,17 @@ export const register: Register = (on: On, options: PluginOptions) => {
     let unrecognised = '';
     const report = (text: string): Promise<void> => logOutcome($, event, `${text}${unrecognised}`);
     // Esc, a hook above that settled first, or the budget: Claude Code has moved
-    // on, so stop, log it as such, and hand back nothing it would act on.
-    const interrupted = async () => {
-      await report('interrupted: Claude Code moved on before the compaction finished; nothing handed back');
+    // on, so stop, log it as such, and hand back nothing it would act on. When
+    // the hook's own budget ran out, Claude Code asks the .catch below, which
+    // logs it (the built-in summary runs then): one line, not two.
+    const interrupted = async (after?: 'returned') => {
+      if (next.budget?.remainingMs !== 0) {
+        await report(
+          after === undefined
+            ? 'interrupted: Claude Code moved on before the compaction finished; nothing handed back'
+            : 'interrupted after the returned line: Claude Code moved on; nothing handed back',
+        );
+      }
       return { skip: 'interrupted' };
     };
     try {
@@ -664,6 +672,8 @@ export const register: Register = (on: On, options: PluginOptions) => {
       // Handed back, not yet installed: Claude Code checks it on the way up
       // (a refusal reaches the .catch below) and installs it after this hook.
       await report(`returned ${messages.length}/${event.messages.length} messages, no summary (${summarize(result)})`);
+      // An Esc while the line was written: Claude Code has moved on.
+      if (next.signal?.aborted) return await interrupted('returned');
       $.ui.toast('compaction done');
       return { messages };
     } catch (error) {

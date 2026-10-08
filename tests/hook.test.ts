@@ -161,6 +161,7 @@ describe('session.compact hook', () => {
     event: { instructions?: string } = {},
     signal?: AbortSignal,
     caught?: { kind: string; message?: string; called: boolean },
+    more: { budget?: { ms: number; remainingMs: number }; onWrite?: (text: string) => void } = {},
   ) {
     const handlers: Record<string, Function> = {};
     const catches: Record<string, Function> = {};
@@ -203,6 +204,7 @@ describe('session.compact hook', () => {
         },
         write: async (path: string, text: string) => {
           files.set(path, text);
+          more.onWrite?.(text);
         },
       },
       ui: {
@@ -217,6 +219,7 @@ describe('session.compact hook', () => {
         return {};
       },
       { signal: signal ?? new AbortController().signal },
+      more.budget && { budget: more.budget },
       caught && { error: { kind: caught.kind, message: caught.message, budget: 1000 }, called: caught.called },
     );
     const hook = caught ? catches['session.compact']! : handlers['session.compact']!;
@@ -283,6 +286,45 @@ describe('session.compact hook', () => {
     expect(returned).toEqual({ skip: 'interrupted' });
     expect(toasts).toEqual([]);
     expect(lines).toEqual([expect.stringMatching(/Z manual interrupted: Claude Code moved on before the compaction finished; nothing handed back$/)]);
+  });
+
+  it('hands nothing back when Claude Code moves on while the outcome is logged', async () => {
+    const controller = new AbortController();
+    const { returned, nextCalls, toasts, lines } = await run(jevFetch(() => 0.1), new Map(), {}, controller.signal, undefined, {
+      onWrite: (text) => {
+        if (text.includes(' returned ')) controller.abort();
+      },
+    });
+    expect(returned).toEqual({ skip: 'interrupted' });
+    expect(nextCalls).toBe(0);
+    expect(toasts).toEqual([]);
+    expect(lines).toEqual([
+      expect.stringMatching(/Z manual returned \d+\/7 messages, no summary \(/),
+      expect.stringMatching(/Z manual interrupted after the returned line: Claude Code moved on; nothing handed back$/),
+    ]);
+  });
+
+  it('writes one line when its budget runs out: the .catch\'s, since the built-in summary runs', async () => {
+    const files = new Map<string, string>();
+    const controller = new AbortController();
+    const timedOut = { ms: 10_000, remainingMs: 0 };
+    const hook = await run(
+      async () => {
+        controller.abort();
+        return { status: 503, ok: false, text: 'busy' };
+      },
+      files,
+      {},
+      controller.signal,
+      undefined,
+      { budget: timedOut },
+    );
+    expect(hook.returned).toEqual({ skip: 'interrupted' });
+    expect(hook.lines).toEqual([]);
+    const caught = await run(jevFetch(() => 0.1), files, {}, controller.signal, { kind: 'timeout', called: false }, { budget: timedOut });
+    expect(caught.lines).toEqual([
+      expect.stringMatching(/Z manual failed in Claude Code \(over its time budget\); built-in summary instead$/),
+    ]);
   });
 
   it('logs what Claude Code refuses or what fails, through its .catch, and lets Claude Code compact', async () => {

@@ -194,7 +194,9 @@ pruned history replaced the built-in summary. When Jev could not remove enough
 (short sessions, or when it fails) the built-in summary runs without a toast.
 The details of both (`returned N/M messages, no summary (…)` or
 `fallback to built-in summary (…)`; `failed in Claude Code (…)` when Claude Code
-refuses what the hook returned; `interrupted` when it moved on, e.g. on Esc) go to the debug log (`claude --debug`)
+refuses what the hook returned or the hook overran its time budget;
+`interrupted` when Claude Code moved on otherwise, e.g. on Esc, even as the
+answer was being logged) go to the debug log (`claude --debug`)
 and, one timestamped line per compaction, to the plugin's own log,
 `~/.claude/fast-jev-compaction/compactions.log` (under `CLAUDE_CONFIG_DIR` when
 set; the newest 200 lines are kept), which the desktop app writes too.

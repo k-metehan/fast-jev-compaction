@@ -130,7 +130,11 @@ export interface CompactOptions {
   instructions?: string;
   /** Minimum keep probability for a call or result to stay. Default 0.5. */
   keepThreshold?: number;
-  /** Newest messages never touched (the first message is always kept). Default 6. */
+  /**
+   * Newest messages never touched (the first message is always kept). Default 6.
+   * Consecutive entries of one role count as one message, as the API sends
+   * them; in Claude Code 6 is the last three tool steps (call and result).
+   */
   preserveRecentMessages?: number;
   /** Estimated token ceiling for the state. Default 25000. */
   maxStateTokens?: number;

@@ -19,7 +19,7 @@
     "preserveRecentMessages": {
       "type": "number",
       "title": "Recent messages to preserve",
-      "description": "Number of newest messages pinned from compaction.",
+      "description": "Number of newest messages pinned from compaction, counted as the API sends them (consecutive entries of one role are one message): 6 keeps the last three tool steps.",
       "default": 6
     },
     "compactAtPercent": {

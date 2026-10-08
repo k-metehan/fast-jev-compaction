@@ -22,7 +22,9 @@ built-in compaction summary with the original messages.
 
 1. Every `tool_use` is paired with its `tool_result` by `tool_use_id`. Calls in
    the first message or in the newest `preserveRecentMessages` messages are
-   pinned and never touched.
+   pinned and never touched. Consecutive entries of one role count as one
+   message, as the API sends them (Claude Code hands one entry per thinking,
+   tool call and tool result), so 6 pins the last three tool steps.
 2. The **state** sent to Jev is the whole conversation so far, oldest first,
    with every tool result replaced by a short note (`ok, 4213 chars (omitted)`,
    or `ok, 16 chars + 1 image (omitted)` for a screenshot).
@@ -118,7 +120,7 @@ put it in a source file.
 | `goal` | last 3 user prompts | Ongoing task description included in the state |
 | `instructions` | none | What the user asked this compaction to keep; added to the goal |
 | `keepThreshold` | `0.5` | Minimum keep probability for a call or result to stay |
-| `preserveRecentMessages` | `6` | Newest messages never touched (the first is always kept) |
+| `preserveRecentMessages` | `6` | Newest messages never touched (the first is always kept); consecutive entries of one role count as one message |
 | `maxStateTokens` | `25000` | Estimated token ceiling for the state |
 | `maxRequestTokens` | `30000` | Estimated ceiling for state plus one batch of questions |
 | `truncateHeadChars` | `300` | Characters of a dropped tool result retained before its note |

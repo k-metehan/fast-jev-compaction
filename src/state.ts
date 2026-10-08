@@ -47,12 +47,24 @@ function abridge(text: string, head: number, tail: number): string {
   return `${text.slice(0, head)}\n[… ${omitted} chars omitted …]\n${text.slice(-tail)}`;
 }
 
-export function isPinned(
-  index: number,
-  total: number,
+/**
+ * Which entries are pinned: the first, and those in the newest
+ * `preserveRecentMessages` messages. A message is what the API sends as one:
+ * consecutive entries of the same role count once, since Claude Code hands
+ * one entry per content block (thinking, tool call and tool result each).
+ */
+export function pinnedEntries(
+  messages: readonly Pick<Message, 'role'>[],
   preserveRecentMessages: number,
-): boolean {
-  return index === 0 || index >= total - preserveRecentMessages;
+): boolean[] {
+  const pinned = messages.map((_, index) => index === 0);
+  let seen = 0;
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    if (index === messages.length - 1 || messages[index]!.role !== messages[index + 1]!.role) seen += 1;
+    if (seen > preserveRecentMessages) break;
+    pinned[index] = true;
+  }
+  return pinned;
 }
 
 /**
@@ -69,6 +81,7 @@ export function collectToolCalls(
       results.set(result.tool_use_id, { index, result });
     }
   });
+  const pinned = pinnedEntries(messages, preserveRecentMessages);
   const calls: ToolCall[] = [];
   messages.forEach((message, callIndex) => {
     for (const tool of message.toolUses) {
@@ -84,9 +97,7 @@ export function collectToolCalls(
         resultChars: found.result.text.length,
         resultImages: found.result.images ?? 0,
         isError: found.result.isError ?? false,
-        pinned:
-          isPinned(callIndex, messages.length, preserveRecentMessages) ||
-          isPinned(found.index, messages.length, preserveRecentMessages),
+        pinned: (pinned[callIndex] ?? false) || (pinned[found.index] ?? false),
       });
     }
   });
@@ -252,8 +263,8 @@ export function fitState(
     if (fits()) return fitted(history, tokens, `inputs<=${limit}`);
   }
 
-  const pinned = (entry: HistoryEntry): boolean =>
-    isPinned(entry.i, messages.length, options.preserveRecentMessages);
+  const pinnedAt = pinnedEntries(messages, options.preserveRecentMessages);
+  const pinned = (entry: HistoryEntry): boolean => pinnedAt[entry.i] ?? false;
   const indices = history.map((_, index) => index);
   const order = [
     ...indices.filter((index) => !pinned(history[index]!)),

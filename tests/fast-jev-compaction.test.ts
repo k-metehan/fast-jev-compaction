@@ -20,6 +20,7 @@ import {
   questionsFor,
   rebuild,
   parseJevResponse,
+  pinnedEntries,
   reductionRatio,
   resolveOptions,
   type HistoryToolCall,
@@ -122,6 +123,25 @@ describe('tool call collection', () => {
     ]);
     expect(calls[2]?.isError).toBe(true);
     expect(calls[0]?.resultChars).toBe(fileA.length);
+  });
+
+  it('counts preserved messages as the API sends them, not entries', () => {
+    // Claude Code: one entry per thinking block, tool call and tool result.
+    const messages = [message('user', 'start')];
+    for (let i = 1; i <= 6; i += 1) {
+      messages.push(message('assistant', ''), call(`s${i}`, 'Bash', { command: `step ${i}` }, 'ok'), result(`s${i}`, 'ok'));
+    }
+    messages.push(message('assistant', ''), message('assistant', 'done'));
+    const pinned = collectToolCalls(messages, 6).map((c) => [c.tool_use_id, c.pinned]);
+    expect(pinned).toEqual([
+      ['s1', false],
+      ['s2', false],
+      ['s3', false],
+      ['s4', true],
+      ['s5', true],
+      ['s6', true],
+    ]);
+    expect(pinnedEntries(messages, 0)).toEqual(messages.map((_, i) => i === 0));
   });
 
   it('ignores calls without a result', () => {

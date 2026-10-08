@@ -47,8 +47,9 @@ built-in compaction summary with the original messages.
    stays under `maxRequestTokens` (30k by default, under Jev's 32k request
    limit). The same full state is resent with every request; up to four
    requests run at once and their answers are merged. A request that is rate
-   limited (429), hits a server error (5xx) or gets no answer is tried once
-   more; if it still fails, its calls are kept (`stats.failedRequests`).
+   limited (429) or hits a server error (5xx) is tried once more; one that is
+   unauthorized (401, 403) or gets no answer is not, and no further request
+   starts. The calls of a failed request are kept (`stats.failedRequests`).
 6. Decisions per call, against `keepThreshold`:
    - `keepResult ≥ threshold` → keep call and result;
    - else `keepCall ≥ threshold` → keep the call, truncate the result to its

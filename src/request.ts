@@ -54,11 +54,20 @@ export class JevTransportError extends Error {
   }
 }
 
-/** Worth one more try: rate limited (429), a server error (5xx), or no answer at all. */
+/** Worth one more try: rate limited (429) or a server error (5xx). */
 export function isRetryable(error: unknown): boolean {
+  return error instanceof JevRequestError && (error.status === 429 || error.status >= 500);
+}
+
+/**
+ * Every other request would fail the same way: unauthorized (401, 403), or no
+ * answer at all (the network refused by policy or switched off, a body over
+ * the host's limit, a timeout).
+ */
+export function stopsAll(error: unknown): boolean {
   return (
     error instanceof JevTransportError ||
-    (error instanceof JevRequestError && (error.status === 429 || error.status >= 500))
+    (error instanceof JevRequestError && (error.status === 401 || error.status === 403))
   );
 }
 

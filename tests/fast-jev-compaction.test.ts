@@ -11,6 +11,7 @@ import {
   fitState,
   IMAGE_CHARS,
   isRetryable,
+  stopsAll,
   JevRequestError,
   JevTransportError,
   MAX_CONCURRENT_REQUESTS,
@@ -546,20 +547,36 @@ describe('requests', () => {
     expect(output.stats.resultsDropped).toBe(10);
   });
 
-  it('tries a rate-limited, failed or unanswered request once more, after a wait', async () => {
-    const { messages, options } = oneCallPerRequest(3);
+  it('tries a rate-limited or failed (5xx) request once more, after a wait', async () => {
+    const { messages, options } = oneCallPerRequest(2);
     const waits: number[] = [];
     const errors: Record<string, Error> = {
       t1: new JevRequestError(429, 'slow down'),
       t2: new JevRequestError(503, 'busy'),
-      t3: new JevTransportError(new Error('timed out')),
     };
     const jev = flaky((id, attempt) => (attempt === 1 ? errors[id] : undefined));
     const output = await compact(messages, jev.asker, { ...options, sleep: async (ms) => void waits.push(ms) });
-    expect([...jev.attempts.values()]).toEqual([2, 2, 2]);
-    expect(waits).toEqual([RETRY_DELAY_MS, RETRY_DELAY_MS, RETRY_DELAY_MS]);
-    expect(output.stats).toMatchObject({ resultsDropped: 3, failedRequests: 0 });
+    expect([...jev.attempts.values()]).toEqual([2, 2]);
+    expect(waits).toEqual([RETRY_DELAY_MS, RETRY_DELAY_MS]);
+    expect(output.stats).toMatchObject({ resultsDropped: 2, failedRequests: 0 });
   });
+
+  for (const [what, error] of [
+    ['unauthorized', new JevRequestError(401, 'bad key')],
+    ['forbidden', new JevRequestError(403, 'no access')],
+    ['unanswered', new JevTransportError(new Error('network access refused by policy'))],
+  ] as const) {
+    it(`does not retry an ${what} request, and starts no more after it`, async () => {
+      const { messages, options } = oneCallPerRequest(10);
+      const jev = flaky((id) => (id === 't1' ? error : undefined));
+      const output = await compact(messages, jev.asker, options);
+      expect(jev.attempts.get('t1')).toBe(1);
+      // The first four were in flight; the other six never started.
+      expect(jev.attempts.size).toBe(MAX_CONCURRENT_REQUESTS);
+      expect(output.stats.failedRequests).toBe(10 - (MAX_CONCURRENT_REQUESTS - 1));
+      expect(output.stats.requestError).toBe(error.message);
+    });
+  }
 
   it('keeps the calls of a request that still fails, and does not retry what will not change', async () => {
     const { messages, options } = oneCallPerRequest(3);
@@ -585,12 +602,15 @@ describe('requests', () => {
     expect([...jev.attempts.values()]).toEqual([2, 2, 2]);
   });
 
-  it('marks a failed fetch as unanswered, so it is retried', async () => {
+  it('marks a failed fetch as unanswered: not retried, and the rest stop', async () => {
     const client = new JevClient({ apiKey: 'k', fetch: (async () => { throw new TypeError('fetch failed'); }) as typeof fetch });
     const error = await client.ask('s', {}).catch((e: unknown) => e);
     expect(error).toBeInstanceOf(JevTransportError);
-    expect(isRetryable(error)).toBe(true);
+    expect(isRetryable(error)).toBe(false);
+    expect(stopsAll(error)).toBe(true);
+    expect(isRetryable(new JevRequestError(429, 'x'))).toBe(true);
     expect(isRetryable(new JevRequestError(404, 'x'))).toBe(false);
+    expect(stopsAll(new JevRequestError(500, 'x'))).toBe(false);
     expect(isRetryable(new Error('Invalid Jev answer for call_t1'))).toBe(false);
   });
 });

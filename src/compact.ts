@@ -1,4 +1,4 @@
-import { isRetryable, noulAnswer } from './request.js';
+import { isRetryable, noulAnswer, stopsAll } from './request.js';
 import { collectToolCalls, estimateTokens, fitState, imageCount } from './state.js';
 import type {
   AttachedContent,
@@ -419,8 +419,9 @@ function count(decisions: readonly CallDecision[], reason: CallDecision['reason'
  * sent as state with every batch of questions. Content the host keeps beside
  * tool results (`attached`) survives: put back as text, or its calls kept.
  * Requests run at most MAX_CONCURRENT_REQUESTS at a time; one that is rate
- * limited, hits a server error or gets no answer is tried once more. The calls
- * of a request that still fails are kept. Throws when no request is answered,
+ * limited (429) or hits a server error (5xx) is tried once more. A request
+ * unauthorized (401, 403) or unanswered stops the ones not yet started. The
+ * calls of a request that fails are kept. Throws when no request is answered,
  * Jev answers malformed, or the history cannot be fitted; the caller decides
  * whether to fall back.
  */
@@ -452,9 +453,17 @@ export async function compact(
     const state = fitState(messages, calls, resolved);
     fitted = state;
     batches = batchCalls(candidates, state.tokens, resolved);
-    const settled = await settleLimited(batches, MAX_CONCURRENT_REQUESTS, (batch) =>
-      askWithRetry(asker, state.state, batch, options.sleep),
-    );
+    // After a failure every other request would share, start no more.
+    let stop: unknown;
+    const settled = await settleLimited(batches, MAX_CONCURRENT_REQUESTS, async (batch) => {
+      if (stop !== undefined) throw stop;
+      try {
+        return await askWithRetry(asker, state.state, batch, options.sleep);
+      } catch (error) {
+        if (stopsAll(error)) stop ??= error;
+        throw error;
+      }
+    });
     for (const outcome of settled) {
       if (outcome.status === 'rejected') failures.push(outcome.reason);
       else for (const [id, answer] of outcome.value) answers.set(id, answer);

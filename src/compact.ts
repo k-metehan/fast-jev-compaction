@@ -24,6 +24,7 @@ export const DEFAULT_OPTIONS: ResolvedCompactOptions = {
   maxRequestTokens: 30_000,
   truncateHeadChars: 300,
   attached: [],
+  deadlineMs: 45_000,
 };
 
 /**
@@ -32,11 +33,23 @@ export const DEFAULT_OPTIONS: ResolvedCompactOptions = {
  */
 export const IMAGE_CHARS = 6_000;
 
-/** Jev requests in flight at once. */
-export const MAX_CONCURRENT_REQUESTS = 4;
+/**
+ * Jev requests in flight at once. A request holds about 40 calls when the
+ * state fills its 25k budget, so a session at 600k tokens asks 8 to 20; at
+ * about 8 s a request, 8 at once is 1 to 3 rounds, inside the deadline.
+ */
+export const MAX_CONCURRENT_REQUESTS = 8;
 
-/** The wait before a failed request is tried again, when `sleep` is given. */
+/** The wait before a failed request is tried again, when `after` is given. */
 export const RETRY_DELAY_MS = 1_000;
+
+/** The Jev requests outran `deadlineMs`. */
+export class JevDeadlineError extends Error {
+  constructor(ms: number) {
+    super(`Jev requests took longer than ${Math.round(ms / 1000)} s`);
+    this.name = 'JevDeadlineError';
+  }
+}
 
 /** Tokens the request envelope (`model`, key names) adds around state and questions. */
 const REQUEST_OVERHEAD_TOKENS = 20;
@@ -66,6 +79,7 @@ export function resolveOptions(options: CompactOptions = {}): ResolvedCompactOpt
       Math.floor(finite(options.truncateHeadChars, DEFAULT_OPTIONS.truncateHeadChars)),
     ),
     attached: options.attached ?? DEFAULT_OPTIONS.attached,
+    deadlineMs: Math.max(1, finite(options.deadlineMs, DEFAULT_OPTIONS.deadlineMs)),
   };
 }
 
@@ -157,13 +171,13 @@ async function askWithRetry(
   asker: JevAsker,
   state: CompactionState,
   batch: readonly ToolCall[],
-  sleep: ((ms: number) => Promise<void>) | undefined,
+  wait: (ms: number) => Promise<void>,
 ): Promise<Map<string, CallAnswer>> {
   try {
     return await askBatch(asker, state, batch);
   } catch (error) {
     if (!isRetryable(error)) throw error;
-    await sleep?.(RETRY_DELAY_MS);
+    await wait(RETRY_DELAY_MS);
     return askBatch(asker, state, batch);
   }
 }
@@ -421,7 +435,8 @@ function count(decisions: readonly CallDecision[], reason: CallDecision['reason'
  * Requests run at most MAX_CONCURRENT_REQUESTS at a time; one that is rate
  * limited (429) or hits a server error (5xx) is tried once more. A request
  * unauthorized (401, 403) or unanswered stops the ones not yet started. The
- * calls of a request that fails are kept. Throws when no request is answered,
+ * calls of a request that fails are kept. Past `deadlineMs` (with `after`)
+ * compact throws. Throws when no request is answered,
  * Jev answers malformed, or the history cannot be fitted; the caller decides
  * whether to fall back.
  */
@@ -453,17 +468,35 @@ export async function compact(
     const state = fitState(messages, calls, resolved);
     fitted = state;
     batches = batchCalls(candidates, state.tokens, resolved);
+    const after = options.after;
+    const wait = (ms: number): Promise<void> =>
+      after ? new Promise<void>((resolve) => void after(ms, resolve)) : Promise.resolve();
     // After a failure every other request would share, start no more.
     let stop: unknown;
-    const settled = await settleLimited(batches, MAX_CONCURRENT_REQUESTS, async (batch) => {
+    const work = settleLimited(batches, MAX_CONCURRENT_REQUESTS, async (batch) => {
       if (stop !== undefined) throw stop;
       try {
-        return await askWithRetry(asker, state.state, batch, options.sleep);
+        return await askWithRetry(asker, state.state, batch, wait);
       } catch (error) {
         if (stopsAll(error)) stop ??= error;
         throw error;
       }
     });
+    let timer: { cancel: () => void } | undefined;
+    const deadline = new Promise<never>((_, reject) => {
+      if (!after) return;
+      timer = after(resolved.deadlineMs, () => {
+        const error = new JevDeadlineError(resolved.deadlineMs);
+        stop ??= error;
+        reject(error);
+      });
+    });
+    let settled: Awaited<typeof work>;
+    try {
+      settled = await Promise.race([work, deadline]);
+    } finally {
+      timer?.cancel();
+    }
     for (const outcome of settled) {
       if (outcome.status === 'rejected') failures.push(outcome.reason);
       else for (const [id, answer] of outcome.value) answers.set(id, answer);

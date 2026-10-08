@@ -45,8 +45,9 @@ built-in compaction summary with the original messages.
    tool would not do).
 5. Questions are split into as many requests as needed so state plus questions
    stays under `maxRequestTokens` (30k by default, under Jev's 32k request
-   limit). The same full state is resent with every request; up to four
-   requests run at once and their answers are merged. A request that is rate
+   limit). The same full state is resent with every request; up to eight
+   requests run at once and their answers are merged, within an overall
+   deadline (`deadlineMs`, 45 s, given a timer: `after`). A request that is rate
    limited (429) or hits a server error (5xx) is tried once more; one that is
    unauthorized (401, 403) or gets no answer is not, and no further request
    starts. The calls of a failed request are kept (`stats.failedRequests`).
@@ -128,6 +129,8 @@ put it in a source file.
 | `maxRequestTokens` | `30000` | Estimated ceiling for state plus one batch of questions |
 | `truncateHeadChars` | `300` | Characters of a dropped tool result retained before its note |
 | `attached` | none | Content kept beside tool results outside the messages (`{ toolUseIds, text? }`) |
+| `after` | `setTimeout` in `compactMessages`, none in `compact` | Timer for the retry wait and the deadline |
+| `deadlineMs` | `45000` | How long the Jev requests may take together before compaction throws (needs `after`) |
 
 `result.stats` reports message and character counts before and after, the
 per-reason decision counts, the state size in estimated tokens, which fitting

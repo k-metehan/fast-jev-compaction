@@ -147,10 +147,16 @@ export interface CompactOptions {
   /** Content the host keeps beside tool results (see AttachedContent). Default none. */
   attached?: readonly AttachedContent[];
   /**
-   * Waits before a Jev request is tried again (rate limited, a server error,
-   * no answer). Default: try again at once.
+   * Starts a timer, as setTimeout does (`$.clock.after` in a Claude Code
+   * hook): the wait before a request is tried again, and the deadline. Without
+   * it a retry goes at once and there is no deadline.
    */
-  sleep?: (ms: number) => Promise<void>;
+  after?: (ms: number, fn: () => void) => { cancel: () => void };
+  /**
+   * How long the Jev requests may take together before compact gives up
+   * (throws, so the caller falls back). Default 45000; needs `after`.
+   */
+  deadlineMs?: number;
 }
 
 export interface ResolvedCompactOptions {
@@ -162,6 +168,7 @@ export interface ResolvedCompactOptions {
   maxRequestTokens: number;
   truncateHeadChars: number;
   attached: readonly AttachedContent[];
+  deadlineMs: number;
 }
 
 export interface CompactResult {

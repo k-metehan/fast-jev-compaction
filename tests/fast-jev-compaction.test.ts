@@ -11,6 +11,7 @@ import {
   fitState,
   IMAGE_CHARS,
   isRetryable,
+  JevDeadlineError,
   stopsAll,
   JevRequestError,
   JevTransportError,
@@ -555,9 +556,15 @@ describe('requests', () => {
       t2: new JevRequestError(503, 'busy'),
     };
     const jev = flaky((id, attempt) => (attempt === 1 ? errors[id] : undefined));
-    const output = await compact(messages, jev.asker, { ...options, sleep: async (ms) => void waits.push(ms) });
+    const after = (ms: number, fn: () => void) => {
+      waits.push(ms);
+      if (ms === RETRY_DELAY_MS) queueMicrotask(fn);
+      return { cancel: () => undefined };
+    };
+    const output = await compact(messages, jev.asker, { ...options, after });
     expect([...jev.attempts.values()]).toEqual([2, 2]);
-    expect(waits).toEqual([RETRY_DELAY_MS, RETRY_DELAY_MS]);
+    // The deadline timer, then one wait per retry.
+    expect(waits).toEqual([45_000, RETRY_DELAY_MS, RETRY_DELAY_MS]);
     expect(output.stats).toMatchObject({ resultsDropped: 2, failedRequests: 0 });
   });
 
@@ -593,6 +600,26 @@ describe('requests', () => {
     expect(output.stats.failedRequests).toBe(2);
     expect(output.stats.requestError).toBe('Jev request failed (500): down');
     expect(reductionRatio(output)).toBeGreaterThan(0);
+  });
+
+  it('gives up at the deadline, and cancels its timer when done in time', async () => {
+    const { messages, options } = oneCallPerRequest(3);
+    const hanging: JevAsker = { ask: () => new Promise(() => undefined) };
+    const timers: { ms: number; cancelled: boolean }[] = [];
+    const after = (ms: number, fn: () => void) => {
+      const timer = { ms, cancelled: false };
+      timers.push(timer);
+      const handle = setTimeout(fn, ms === 45_000 ? 5 : ms);
+      return { cancel: () => { timer.cancelled = true; clearTimeout(handle); } };
+    };
+    await expect(compact(messages, hanging, { ...options, after })).rejects.toThrow(
+      new JevDeadlineError(45_000).message,
+    );
+    expect(new JevDeadlineError(45_000).message).toBe('Jev requests took longer than 45 s');
+
+    timers.length = 0;
+    await compact(messages, flaky(() => undefined).asker, { ...options, after, deadlineMs: 60_000 });
+    expect(timers).toEqual([{ ms: 60_000, cancelled: true }]);
   });
 
   it('throws when no request is answered', async () => {

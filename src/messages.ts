@@ -6,12 +6,15 @@ export type CompactMessagesOptions = CompactOptions & JevClientOptions;
 
 /**
  * `compact` with a `JevClient` built from the options (key from
- * `TYPESAFE_API_KEY` by default), waiting with a timer before a retry.
+ * `TYPESAFE_API_KEY` by default), with timers for the retry wait and the deadline.
  */
 export function compactMessages(
   messages: readonly Message[],
   options: CompactMessagesOptions = {},
 ): Promise<CompactResult> {
-  const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
-  return compact(messages, new JevClient(options), { sleep, ...options });
+  const after = (ms: number, fn: () => void) => {
+    const timer = setTimeout(fn, ms);
+    return { cancel: () => clearTimeout(timer) };
+  };
+  return compact(messages, new JevClient(options), { after, ...options });
 }

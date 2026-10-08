@@ -595,14 +595,9 @@ export const register: Register = (on: On, options: PluginOptions) => {
         attached,
         // `/compact <instructions>`: what the user wants kept, for Jev's goal.
         ...(event.instructions?.trim() && { instructions: event.instructions }),
-        // The wait before a request is tried again; a failed wait just retries sooner.
-        sleep: async (ms) => {
-          try {
-            await $.clock.sleep(ms, { signal: next.signal });
-          } catch {
-            // Retry sooner.
-          }
-        },
+        // Timers for the retry wait and the deadline. Not $.clock.sleep: the
+        // hook's 10 s budget runs on through a sleep, not through a fetch.
+        after: (ms, fn) => $.clock.after(ms, fn),
       };
       const fetchFn: HookFetch = async (url, init) => {
         const response = await $.http.fetch(url, init);

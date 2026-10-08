@@ -178,7 +178,14 @@ describe('session.compact hook', () => {
       env: { get: async (name: string) => env[name] },
       settings: { read: async () => ({}) },
       session: { messages: async () => view },
-      clock: { sleep: async (ms: number) => void sleeps.push(ms) },
+      clock: {
+        // Short waits fire at once; the deadline never does.
+        after: (ms: number, fn: () => void) => {
+          sleeps.push(ms);
+          if (ms < 10_000) queueMicrotask(fn);
+          return { cancel: () => undefined };
+        },
+      },
       http: { fetch: async (url: string, init?: { body?: string }) => fetch(url, init) },
       fs: {
         read: async (path: string) => {
@@ -225,14 +232,14 @@ describe('session.compact hook', () => {
     expect(JSON.parse(bodies[0]!).state.goal).toMatch(/\nThe user asked this compaction to keep: keep the npm test output$/);
   });
 
-  it('tries a failed Jev request once more, after a second on the host clock', async () => {
+  it('tries a failed Jev request once more, after a second on a host timer, under a 45 s deadline', async () => {
     let calls = 0;
     const { sleeps, lines } = await run(async () => {
       calls += 1;
       return { status: 503, ok: false, text: 'busy' };
     });
     expect(calls).toBe(2);
-    expect(sleeps).toEqual([1000]);
+    expect(sleeps).toEqual([45_000, 1000]);
     expect(lines[0]).toMatch(/fallback to built-in summary \(Jev request failed \(503\): busy\)$/);
   });
 

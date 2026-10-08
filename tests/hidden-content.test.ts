@@ -87,6 +87,12 @@ async function compactThroughHook(
     settings: { read: async () => ({}) },
     session: { messages: async (args: unknown) => view(args) },
     http: { fetch: jev(answer) },
+    clock: {
+      after: (ms: number, fn: () => void) => {
+        if (ms < 10_000) queueMicrotask(fn);
+        return { cancel: () => undefined };
+      },
+    },
     ui: { log: (text: string) => logs.push(text), toast: (text: string) => toasts.push(text) },
   };
   const out = (await handlers['session.compact']!($, { trigger: 'manual', messages: rows }, async () => {

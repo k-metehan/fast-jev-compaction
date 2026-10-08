@@ -236,6 +236,18 @@ function reminderPieces(text: string): string[] | null {
 }
 
 /**
+ * Built-in tools whose results hold no images of their own. An image in one of
+ * their results was put there by the host: with reminder folding on, a
+ * picture the user pasted while the tool ran folds into its result, and
+ * dropping the result would drop the user's picture.
+ */
+const TEXT_ONLY_TOOLS = new Set([
+  'Bash', 'BashOutput', 'KillShell', 'Edit', 'MultiEdit', 'Write', 'NotebookEdit', 'Grep', 'Glob', 'LS',
+  'TodoWrite', 'WebFetch', 'WebSearch', 'Skill', 'ToolSearch', 'Agent', 'Task', 'TaskOutput', 'TaskStop',
+  'AskUserQuestion', 'EnterPlanMode', 'ExitPlanMode', 'SendMessage', 'Monitor',
+]);
+
+/**
  * Claude Code hands `session.compact` one row per user or assistant message
  * and keeps every other message of the transcript (reminders, messages the
  * user typed while a tool ran, skill bodies, hook output) in the group of the
@@ -262,7 +274,9 @@ export function attachedContent(
 ): AttachedContent[] {
   const own = new Map<string, string>();
   const at = new Map<string, number>();
+  const toolOf = new Map<string, string>();
   rows.forEach((row, index) => {
+    for (const tool of row.toolUses) toolOf.set(tool.tool_use_id, tool.tool);
     for (const result of row.toolResults ?? []) {
       own.set(result.tool_use_id, result.text.trim());
       at.set(result.tool_use_id, index);
@@ -311,6 +325,13 @@ export function attachedContent(
       if (
         Array.isArray(content) &&
         content.some((part) => !['text', 'image'].includes(String((part as { type?: unknown } | null)?.type)))
+      ) {
+        readable = false;
+      }
+      if (
+        Array.isArray(content) &&
+        TEXT_ONLY_TOOLS.has(toolOf.get(id as string) ?? '') &&
+        content.some((part) => (part as { type?: unknown } | null)?.type === 'image')
       ) {
         readable = false;
       }

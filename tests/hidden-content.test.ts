@@ -347,6 +347,32 @@ describe('images in tool results', () => {
     return raw;
   }
 
+  it('keeps a text-only tool\'s result that holds an image (a pasted picture folded in)', async () => {
+    const t = transcriptBuilder();
+    const raw: Raw[] = [t.prompt('Build it'), t.thinking(), t.use('b', 'Bash', { command: 'make' })];
+    raw.push({
+      type: 'user',
+      uuid: 'folded',
+      toolUseResult: { stdout: output(1) },
+      message: {
+        content: [
+          {
+            type: 'tool_result',
+            tool_use_id: 'b',
+            content: [
+              { type: 'text', text: output(1) },
+              { type: 'image', source: { type: 'base64', media_type: 'image/png', data: 'iVBORw0KGgo=' } },
+            ],
+          },
+        ],
+      },
+    });
+    raw.push(t.thinking(), t.use('c', 'Bash', { command: 'step c' }), t.result('c', output(3)), t.say('done'));
+    const { final, logs } = await compactThroughHook(raw, answers('drop_result', ['t1']));
+    expect(final).toContain(raw.find((entry) => entry.uuid === 'folded'));
+    expect(logs.join('\n')).toMatch(/1 protected/);
+  });
+
   it('counts screenshots in the reduction and drops their images with the result', async () => {
     const raw = screenshots();
     const { final, out, logs } = await compactThroughHook(raw, answers('drop_result', ['t1', 't2']));

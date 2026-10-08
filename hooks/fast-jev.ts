@@ -380,6 +380,19 @@ export function resultImages(view: readonly ApiMessage[]): Map<string, number> {
   return images;
 }
 
+/** How many of the rows' tool results the API form does not show. */
+export function resultsOutsideView(rows: readonly SessionMessage[], view: readonly ApiMessage[]): number {
+  const shown = new Set<unknown>();
+  for (const message of view) {
+    if (message.role !== 'user' || !Array.isArray(message.content)) continue;
+    for (const block of message.content) if (block.type === 'tool_result') shown.add(block['tool_use_id']);
+  }
+  return rows.reduce(
+    (sum, row) => sum + (row.toolResults ?? []).filter((result) => !shown.has(result.tool_use_id)).length,
+    0,
+  );
+}
+
 type ApiViewSource = {
   session: { messages: (args: { as: 'api'; agentId?: string }) => Promise<unknown> };
 };
@@ -597,8 +610,14 @@ export const register: Register = (on: On, options: PluginOptions) => {
       };
       const { result, messages } = await compactSession(event.messages, config, fetchFn, resultImages(view));
       if (reductionRatio(result) < config.minReductionRatio) {
+        // The API form holds the newest 4096 messages: older results are kept unseen.
+        const outside = resultsOutsideView(event.messages, view);
+        const why =
+          outside > 0
+            ? `session longer than the API view: ${outside} of ${result.stats.calls} tool results lie outside it and were kept; `
+            : '';
         await report(
-          `fallback to built-in summary (below ${percent(config.minReductionRatio)} minimum: ${summarize(result)})`,
+          `fallback to built-in summary (${why}below ${percent(config.minReductionRatio)} minimum: ${summarize(result)})`,
         );
         return next(event);
       }

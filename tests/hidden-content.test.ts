@@ -71,13 +71,14 @@ async function compactThroughHook(
   raw: Raw[],
   answer: (name: string) => number,
   view: (args: unknown) => unknown = () => apiViewOf(raw),
+  options: Record<string, unknown> = OPTIONS,
 ) {
   const engine = host();
   const rows = engine.rowsOf(raw);
   const handlers: Record<string, Function> = {};
   register(((name: string, hook: Function) => {
     handlers[name] = hook;
-  }) as never, OPTIONS as never);
+  }) as never, options as never);
   const logs: string[] = [];
   const toasts: string[] = [];
   let fellBack = false;
@@ -255,6 +256,20 @@ describe('hidden messages beside a rewritten tool result (Claude Code 2.1.292)',
     expect(count(final, 'Tool loaded.')).toBe(0);
     expect(count(final, '"q":"invoice"')).toBe(0);
     expect(logs.join('\n')).toMatch(/1 call_dropped, 1 pinned, 1 protected/);
+  });
+
+  it('names a session longer than the API view as the reason when too little goes', async () => {
+    const { raw } = session();
+    const options = { ...OPTIONS, minReductionRatio: 0.25 };
+    // The API form keeps the newest messages only: here, from step 5's result on.
+    const cut = raw.findIndex((entry) => JSON.stringify(entry).includes('"step 5"'));
+    const short = await compactThroughHook(raw, answers('drop_call', ['t1', 't2']), () => apiViewOf(raw.slice(cut + 1)), options);
+    expect(short.fellBack).toBe(true);
+    expect(short.logs.join('\n')).toMatch(
+      /fallback to built-in summary \(session longer than the API view: 4 of 6 tool results lie outside it and were kept; below 25% minimum/,
+    );
+    const whole = await compactThroughHook(raw, answers('drop_call', ['t1', 't2']), undefined, options);
+    expect(whole.fellBack).toBe(false);
   });
 
   it('falls back to the built-in summary when the host gives no API view', async () => {

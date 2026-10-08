@@ -10,6 +10,7 @@ import {
   estimateTokens,
   fitState,
   JevClient,
+  rebuild,
   parseJevResponse,
   reductionRatio,
   resolveOptions,
@@ -292,14 +293,12 @@ describe('decisions', () => {
       'go ahead',
     ]);
     expect(kept[0]).toBe(messages[0]);
-    expect(kept[2]).not.toBe(messages[4]);
-    expect(kept[2]?.toolUses[0]?.text).toMatch(
-      new RegExp(`^${'x'.repeat(300)}\\n\\[fast-jev-compaction truncated 1700 chars`),
-    );
+    // The call of a dropped result stays the same object: only the result is rewritten.
+    expect(kept[2]).toBe(messages[4]);
+    expect(kept[2]?.toolUses[0]?.text).toBe('x'.repeat(2000));
     expect(kept[3]?.toolResults?.[0]?.text).toMatch(
       new RegExp(`^${'x'.repeat(300)}\\n\\[fast-jev-compaction truncated 1700 chars`),
     );
-    expect(kept[2]).not.toBe(messages[4]);
     expect(kept[3]).not.toBe(messages[5]);
     expect(kept[4]).toBe(messages[6]);
     expect(kept[5]?.toolResults?.[0]?.text).toContain('expected 2 to be 3');
@@ -310,6 +309,45 @@ describe('decisions', () => {
     const shortKept = applyDecisions(shortMessages, decisions, calls, 300);
     expect(shortKept[2]).toBe(shortMessages[4]);
     expect(shortKept[3]).toBe(shortMessages[5]);
+  });
+
+  it('puts attached content back after its results, or keeps calls it cannot put back', () => {
+    const messages = transcript();
+    const calls = collectToolCalls(messages, 0);
+    const drop = (action: 'drop_result' | 'drop_call') =>
+      calls.map((c) =>
+        decideCall(c, action === 'drop_call' ? { keepCall: 0.1, keepResult: 0.1 } : { keepCall: 0.9, keepResult: 0.1 }, options),
+      );
+    const note = 'the user typed this while tool-2 ran';
+
+    // Removed: put back as a user message in the result's place.
+    const removed = rebuild(messages, drop('drop_call'), calls, 300, [{ toolUseIds: ['tool-2'], text: note }]);
+    expect(removed.carried).toHaveLength(1);
+    const at = removed.messages.findIndex((m) => m.text === note);
+    expect(removed.messages[at - 1]?.text).toBe('a.ts looks fine; checking b.ts');
+    expect(removed.messages[at]).toMatchObject({ role: 'user', toolUses: [] });
+
+    // Rebuilt: appended to the rebuilt result message.
+    const truncated = rebuild(messages, drop('drop_result'), calls, 300, [{ toolUseIds: ['tool-2'], text: note }]);
+    expect(truncated.messages[5]?.text).toBe(note);
+    expect(truncated.messages[5]?.toolResults?.[0]?.text).toMatch(/fast-jev-compaction truncated/);
+
+    // Shared by a kept result and a dropped one: the dropped one is kept too.
+    const mixed = rebuild(
+      messages,
+      [drop('drop_call')[0]!, decideCall(calls[1]!, { keepCall: 1, keepResult: 1 }, options), drop('drop_call')[2]!],
+      calls,
+      300,
+      [{ toolUseIds: ['tool-1', 'tool-2'], text: note }],
+    );
+    expect(mixed.carried).toHaveLength(0);
+    expect(mixed.decisions.map((d) => d.reason)).toEqual(['protected', 'kept', 'call_dropped']);
+    expect(mixed.messages[2]).toBe(messages[2]);
+
+    // No text form: kept, whatever the decision.
+    const held = rebuild(messages, drop('drop_call'), calls, 300, [{ toolUseIds: ['tool-3'] }]);
+    expect(held.decisions[2]).toMatchObject({ action: 'keep', reason: 'protected' });
+    expect(held.messages).toContain(messages[7]);
   });
 
   it('honours truncateHeadChars, including a zero head', () => {
@@ -323,7 +361,7 @@ describe('decisions', () => {
     expect(kept[2]?.toolResults?.[0]?.text).toBe(
       `${original.slice(0, 50)}\n[fast-jev-compaction truncated ${total - 50} chars of this tool result; re-run the tool if needed]`,
     );
-    expect(kept[1]?.toolUses[0]?.text).toBe(kept[2]?.toolResults?.[0]?.text);
+    expect(kept[1]).toBe(messages[1]);
 
     const noHead = applyDecisions(messages, decisions, calls, 0);
     expect(noHead[2]?.toolResults?.[0]?.text).toBe(

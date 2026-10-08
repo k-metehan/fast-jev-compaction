@@ -14,6 +14,16 @@ item is kept when Jev's probability reaches `keepThreshold`; a dropped result
 is truncated to its first `truncateHeadChars` characters plus a one-line note,
 and a dropped call disappears with its result.
 
+Claude Code hands the hook one row per user or assistant message and keeps
+every other message (reminders, messages typed while a tool ran, skill
+bodies) beside the row before it; a row handed back rebuilt or left out
+loses them. The hook reads that content from the conversation's API form
+(`$.session.messages({ as: 'api' })`, Claude Code 2.1.292 or later) and hands
+it to the library as `attached`: when every result it sits beside is
+truncated or dropped, its text is put back right after them; when it is not
+text (an image) or cannot be told apart, those calls are kept. Without the
+API form the hook falls back to the built-in summary.
+
 The state is fitted into `maxStateTokens` in stages: tool inputs are
 truncated, then long texts are abridged (oldest first, pinned messages last),
 then old messages collapse to a `[… N chars omitted …]` note, then old tool

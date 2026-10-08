@@ -82,10 +82,10 @@ describe('session message mapping', () => {
     const out = toSessionMessages(messages, applyDecisions(messages, decisions, calls, 300));
     expect(out).toHaveLength(messages.length);
     expect(out[0]).toBe(messages[0]);
-    expect(out[1]?.handle).toBeUndefined();
-    expect(out[1]?.toolUses[0]?.text).toMatch(
-      new RegExp(`^${'x'.repeat(300)}\\n\\[fast-jev-compaction truncated 1700 chars`),
-    );
+    // A dropped result leaves its call alone, so the call keeps its handle (and the
+    // hidden messages the engine keeps beside it).
+    expect(out[1]).toBe(messages[1]);
+    expect(out[1]?.handle).toBe('h-tool-1');
     expect(out[2]?.handle).toBeUndefined();
     expect(out[2]?.toolResults?.[0]?.text).toMatch(
       new RegExp(`^${'x'.repeat(300)}\\n\\[fast-jev-compaction truncated 1700 chars`),
@@ -155,9 +155,19 @@ describe('session.compact hook', () => {
     register(((name: string, h: Function) => { handlers[name] = h; }) as never, { preserveRecentMessages: 1 } as never);
     const logs: { text: string; to?: string }[] = [];
     const toasts: string[] = [];
+    // The API form of transcript(): nothing kept beside its rows.
+    const view = transcript().map((row) => ({
+      role: row.role,
+      content: [
+        ...(row.toolResults ?? []).map((r) => ({ type: 'tool_result', tool_use_id: r.tool_use_id, content: r.text })),
+        ...(row.text ? [{ type: 'text', text: row.text }] : []),
+        ...row.toolUses.map((u) => ({ type: 'tool_use', id: u.tool_use_id, name: u.tool, input: u.input })),
+      ],
+    }));
     const $ = {
       env: { get: async () => 'k' },
       settings: { read: async () => ({}) },
+      session: { messages: async () => view },
       http: { fetch: async (url: string, init?: { body?: string }) => fetch(url, init) },
       ui: {
         log: (text: string, options?: { to?: string }) => logs.push({ text, to: options?.to }),

@@ -1,6 +1,8 @@
 import { noulAnswer } from './request.js';
 import { collectToolCalls, estimateTokens, fitState } from './state.js';
 import type {
+  AttachedContent,
+  CallAction,
   CallAnswer,
   CallDecision,
   CompactOptions,
@@ -11,7 +13,6 @@ import type {
   Message,
   ResolvedCompactOptions,
   ToolCall,
-  ToolUse,
 } from './types.js';
 
 export const DEFAULT_OPTIONS: ResolvedCompactOptions = {
@@ -21,6 +22,7 @@ export const DEFAULT_OPTIONS: ResolvedCompactOptions = {
   maxStateTokens: 25_000,
   maxRequestTokens: 30_000,
   truncateHeadChars: 300,
+  attached: [],
 };
 
 /** Tokens the request envelope (`model`, key names) adds around state and questions. */
@@ -49,6 +51,7 @@ export function resolveOptions(options: CompactOptions = {}): ResolvedCompactOpt
       0,
       Math.floor(finite(options.truncateHeadChars, DEFAULT_OPTIONS.truncateHeadChars)),
     ),
+    attached: options.attached ?? DEFAULT_OPTIONS.attached,
   };
 }
 
@@ -99,12 +102,13 @@ export function batchCalls(
 }
 
 export function decideCall(
-  call: Pick<ToolCall, 'id' | 'tool' | 'pinned'>,
+  call: Pick<ToolCall, 'id' | 'tool' | 'pinned' | 'protected'>,
   answer: CallAnswer,
   options: Pick<ResolvedCompactOptions, 'keepThreshold'>,
 ): CallDecision {
   const base = { id: call.id, tool: call.tool, ...answer };
   if (call.pinned) return { ...base, action: 'keep', reason: 'pinned' };
+  if (call.protected) return { ...base, action: 'keep', reason: 'protected' };
   if (answer.keepResult >= options.keepThreshold) {
     return { ...base, action: 'keep', reason: 'kept' };
   }
@@ -141,87 +145,171 @@ function truncatedResultText(text: string, isError: boolean, headChars: number):
 }
 
 /**
- * Rebuilds the conversation from the decisions. A dropped call disappears
- * together with its result; a dropped result keeps a bounded head and note.
- * Messages that lose all their content are removed; untouched messages are
- * returned as the same objects they came in as.
+ * One message under the actions: the same object when nothing in it changes,
+ * a rebuilt copy, or null when it loses all its content. A dropped call goes
+ * with its tool_use and its result; a dropped result keeps a bounded head and
+ * note. The tool_use of a dropped result stays the same object: what the model
+ * reads of a call's outcome is the tool_result alone.
  */
+function rewriteMessage(
+  message: Message,
+  actions: ReadonlyMap<string, CallAction>,
+  headChars: number,
+): Message | null {
+  const results = message.toolResults ?? [];
+  const touched =
+    message.toolUses.some((tool) => actions.get(tool.tool_use_id) === 'drop_call') ||
+    results.some((result) => actions.has(result.tool_use_id));
+  if (!touched) return message;
+  const toolUses = message.toolUses.filter(
+    (tool) => actions.get(tool.tool_use_id) !== 'drop_call',
+  );
+  const toolResults = results
+    .filter((result) => actions.get(result.tool_use_id) !== 'drop_call')
+    .map((result) => {
+      if (actions.get(result.tool_use_id) !== 'drop_result') return result;
+      const text = truncatedResultText(result.text, result.isError ?? false, headChars);
+      return text === result.text
+        ? result
+        : {
+            tool_use_id: result.tool_use_id,
+            text,
+            isError: result.isError,
+          };
+    });
+  if (
+    toolUses.length === message.toolUses.length &&
+    toolResults.length === results.length &&
+    toolResults.every((result, index) => result === results[index])
+  ) {
+    return message;
+  }
+  if (message.text.trim().length === 0 && toolUses.length === 0 && toolResults.length === 0) {
+    return null;
+  }
+  const rebuilt: Message = { role: message.role, text: message.text, toolUses };
+  if (toolResults.length > 0) rebuilt.toolResults = toolResults;
+  return rebuilt;
+}
+
+function actionsOf(
+  decisions: readonly CallDecision[],
+  calls: readonly ToolCall[],
+): Map<string, CallAction> {
+  const byId = new Map(calls.map((call) => [call.id, call]));
+  const actions = new Map<string, CallAction>();
+  for (const decision of decisions) {
+    const call = byId.get(decision.id);
+    if (call && decision.action !== 'keep') actions.set(call.tool_use_id, decision.action);
+  }
+  return actions;
+}
+
+export type Rebuilt = {
+  messages: Message[];
+  /** The decisions as applied: a call whose attached content could not be put back is `protected`. */
+  decisions: CallDecision[];
+  /** The attached contents put back as text. */
+  carried: AttachedContent[];
+};
+
+/**
+ * Rebuilds the conversation from the decisions without losing attached
+ * content (see AttachedContent). Untouched messages are returned as the same
+ * objects they came in as; messages that lose all their content are removed.
+ *
+ * When every message holding an attached content's results is rebuilt or
+ * removed, its text is put back after them: appended to the last one, or as a
+ * user message of its own in its place. When only some are (the content's
+ * owner is unknown), or the content has no text, those calls are kept instead.
+ */
+export function rebuild(
+  messages: readonly Message[],
+  decisions: readonly CallDecision[],
+  calls: readonly ToolCall[],
+  headChars: number,
+  attached: readonly AttachedContent[] = [],
+): Rebuilt {
+  const actions = actionsOf(decisions, calls);
+  const holders = attached.map((content) => {
+    const ids = new Set(content.toolUseIds);
+    const indices: number[] = [];
+    messages.forEach((message, index) => {
+      if ((message.toolResults ?? []).some((result) => ids.has(result.tool_use_id))) indices.push(index);
+    });
+    return indices;
+  });
+
+  let out = messages.map((message) => rewriteMessage(message, actions, headChars));
+  const lost = (index: number): boolean => out[index] !== messages[index];
+  const reverted = new Set<string>();
+  for (let pass = 0; pass < attached.length + 1; pass += 1) {
+    let changed = false;
+    attached.forEach((content, n) => {
+      const indices = holders[n] ?? [];
+      const gone = indices.filter(lost);
+      if (gone.length === 0) return;
+      if (content.text !== undefined && gone.length === indices.length) return;
+      for (const index of gone) {
+        for (const result of messages[index]?.toolResults ?? []) {
+          if (actions.delete(result.tool_use_id)) {
+            reverted.add(result.tool_use_id);
+            changed = true;
+          }
+        }
+      }
+    });
+    if (!changed) break;
+    out = messages.map((message) => rewriteMessage(message, actions, headChars));
+  }
+
+  const putBack = new Map<number, string[]>();
+  const carried: AttachedContent[] = [];
+  attached.forEach((content, n) => {
+    const indices = holders[n] ?? [];
+    const text = content.text?.trim();
+    if (!text || indices.length === 0 || !indices.every(lost)) return;
+    const last = indices[indices.length - 1]!;
+    putBack.set(last, [...(putBack.get(last) ?? []), text]);
+    carried.push(content);
+  });
+
+  const kept: Message[] = [];
+  out.forEach((message, index) => {
+    const texts = putBack.get(index);
+    if (!texts) {
+      if (message) kept.push(message);
+      return;
+    }
+    if (message) {
+      kept.push({ ...message, text: [message.text, ...texts].filter((t) => t.length > 0).join('\n\n') });
+    } else {
+      kept.push({ role: 'user', text: texts.join('\n\n'), toolUses: [] });
+    }
+  });
+
+  const byId = new Map(calls.map((call) => [call.id, call]));
+  return {
+    messages: kept,
+    decisions: decisions.map((decision): CallDecision => {
+      const call = byId.get(decision.id);
+      return call && reverted.has(call.tool_use_id)
+        ? { ...decision, action: 'keep', reason: 'protected' }
+        : decision;
+    }),
+    carried,
+  };
+}
+
+/** `rebuild`, returning the messages alone. */
 export function applyDecisions(
   messages: readonly Message[],
   decisions: readonly CallDecision[],
   calls: readonly ToolCall[],
   headChars: number,
+  attached: readonly AttachedContent[] = [],
 ): Message[] {
-  const byId = new Map(calls.map((call) => [call.id, call]));
-  const actions = new Map<string, CallDecision['action']>();
-  for (const decision of decisions) {
-    const call = byId.get(decision.id);
-    if (call && decision.action !== 'keep') actions.set(call.tool_use_id, decision.action);
-  }
-  const kept: Message[] = [];
-  for (const message of messages) {
-    const touched =
-      message.toolUses.some((tool) => actions.has(tool.tool_use_id)) ||
-      (message.toolResults ?? []).some((result) => actions.has(result.tool_use_id));
-    if (!touched) {
-      kept.push(message);
-      continue;
-    }
-    const toolUses = message.toolUses
-      .filter((tool) => actions.get(tool.tool_use_id) !== 'drop_call')
-      .map((tool) => {
-        if (actions.get(tool.tool_use_id) !== 'drop_result') return tool;
-        const text = truncatedResultText(
-          tool.text ?? '',
-          tool.isError ?? false,
-          headChars,
-        );
-        if ((tool.text ?? '') === text) return tool;
-        const copy: ToolUse = {
-          tool_use_id: tool.tool_use_id,
-          tool: tool.tool,
-          input: tool.input,
-          text,
-        };
-        if (tool.isError) copy.isError = true;
-        return copy;
-      });
-    const toolResults = (message.toolResults ?? [])
-      .filter((result) => actions.get(result.tool_use_id) !== 'drop_call')
-      .map((result) => {
-        if (actions.get(result.tool_use_id) !== 'drop_result') return result;
-        const text = truncatedResultText(result.text, result.isError ?? false, headChars);
-        return text === result.text
-          ? result
-          : {
-              tool_use_id: result.tool_use_id,
-              text,
-              isError: result.isError,
-            };
-      });
-    if (
-      !message.toolUses.some(
-        (tool) => actions.get(tool.tool_use_id) === 'drop_call',
-      ) &&
-      !(message.toolResults ?? []).some(
-        (result) => actions.get(result.tool_use_id) === 'drop_call',
-      ) &&
-      toolUses.every((tool, index) => tool === message.toolUses[index]) &&
-      toolResults.every(
-        (result, index) => result === message.toolResults?.[index],
-      )
-    ) {
-      kept.push(message);
-      continue;
-    }
-    if (message.text.trim().length === 0 && toolUses.length === 0 && toolResults.length === 0) {
-      continue;
-    }
-    const rebuilt: Message = { role: message.role, text: message.text, toolUses };
-    if (toolResults.length > 0) rebuilt.toolResults = toolResults;
-    kept.push(rebuilt);
-  }
-  return kept;
+  return rebuild(messages, decisions, calls, headChars, attached).messages;
 }
 
 /** Characters of text, tool input and tool output a message holds. */
@@ -251,8 +339,10 @@ function count(decisions: readonly CallDecision[], reason: CallDecision['reason'
  * Compacts a transcript by asking Jev, for every tool call outside the pinned
  * first and newest messages, whether the call and whether its result must
  * stay. The whole history (results omitted, fitted into `maxStateTokens`) is
- * sent as state with every batch of questions. Throws when Jev fails or the
- * history cannot be fitted; the caller decides whether to fall back.
+ * sent as state with every batch of questions. Content the host keeps beside
+ * tool results (`attached`) survives: put back as text, or its calls kept.
+ * Throws when Jev fails or the history cannot be fitted; the caller decides
+ * whether to fall back.
  */
 export async function compact(
   messages: readonly Message[],
@@ -261,9 +351,18 @@ export async function compact(
 ): Promise<CompactResult> {
   const started = Date.now();
   const resolved = resolveOptions(options);
-  const calls = collectToolCalls(messages, resolved.preserveRecentMessages);
-  const candidates = calls.filter((call) => !call.pinned);
-  const charsBefore = messages.reduce((sum, message) => sum + messageChars(message), 0);
+  const held = new Set(
+    resolved.attached.flatMap((content) => (content.text === undefined ? content.toolUseIds : [])),
+  );
+  const calls = collectToolCalls(messages, resolved.preserveRecentMessages).map((call) =>
+    held.has(call.tool_use_id) ? { ...call, protected: true } : call,
+  );
+  const candidates = calls.filter((call) => !call.pinned && !call.protected);
+  const attachedChars = (contents: readonly AttachedContent[]): number =>
+    contents.reduce((sum, content) => sum + (content.text?.trim().length ?? 0), 0);
+  const charsBefore =
+    messages.reduce((sum, message) => sum + messageChars(message), 0) +
+    attachedChars(resolved.attached);
 
   let fitted: { tokens: number; stage: string } = { tokens: 0, stage: '' };
   let batches: ToolCall[][] = [];
@@ -278,14 +377,15 @@ export async function compact(
     for (const map of answered) for (const [id, answer] of map) answers.set(id, answer);
   }
 
-  const decisions = calls.map((call) =>
+  const decided = calls.map((call) =>
     decideCall(call, answers.get(call.id) ?? { keepCall: 1, keepResult: 1 }, resolved),
   );
-  const kept = applyDecisions(
+  const { messages: kept, decisions, carried } = rebuild(
     messages,
-    decisions,
+    decided,
     calls,
     resolved.truncateHeadChars,
+    resolved.attached,
   );
   return {
     messages: kept,
@@ -294,12 +394,18 @@ export async function compact(
       messagesBefore: messages.length,
       messagesAfter: kept.length,
       charsBefore,
-      charsAfter: kept.reduce((sum, message) => sum + messageChars(message), 0),
+      // Attached content put back is in the messages now; the rest stays attached.
+      charsAfter:
+        kept.reduce((sum, message) => sum + messageChars(message), 0) +
+        attachedChars(resolved.attached) -
+        attachedChars(carried),
       calls: calls.length,
       kept: count(decisions, 'kept'),
       resultsDropped: count(decisions, 'result_dropped'),
       callsDropped: count(decisions, 'call_dropped'),
       pinned: count(decisions, 'pinned'),
+      protected: count(decisions, 'protected'),
+      carried: carried.length,
       stateTokens: fitted.tokens,
       stateStage: fitted.stage,
       requests: batches.length,

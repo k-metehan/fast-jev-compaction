@@ -45,6 +45,28 @@ export interface ToolCall {
   isError: boolean;
   /** In the first or the newest preserved messages; never a candidate. */
   pinned: boolean;
+  /** Its result carries attached content that cannot be put back; never a candidate. */
+  protected?: boolean;
+}
+
+/**
+ * Content the host keeps beside some tool results, outside the messages, and
+ * loses when a message holding one of those results is rebuilt or removed. In
+ * Claude Code: the reminders, the messages the user typed while a tool ran,
+ * and skill bodies that follow a tool result.
+ */
+export interface AttachedContent {
+  /**
+   * The results it sits beside. The host cannot say which one it belongs to,
+   * so it is lost only when every message holding them is rebuilt or removed.
+   */
+  toolUseIds: string[];
+  /**
+   * The content as text, put back after those results when they are all
+   * rebuilt or removed. Absent when it cannot be put back as text (an image,
+   * or content the host could not attribute): those calls are then kept.
+   */
+  text?: string;
 }
 
 export interface CallAnswer {
@@ -60,7 +82,11 @@ export interface CallDecision extends CallAnswer {
   id: string;
   tool: string;
   action: CallAction;
-  reason: 'pinned' | 'kept' | 'result_dropped' | 'call_dropped';
+  /**
+   * `protected`: kept because dropping it would lose attached content that
+   * cannot be put back (see AttachedContent).
+   */
+  reason: 'pinned' | 'protected' | 'kept' | 'result_dropped' | 'call_dropped';
 }
 
 export interface HistoryToolCall {
@@ -105,6 +131,8 @@ export interface CompactOptions {
   maxRequestTokens?: number;
   /** Characters of a dropped tool result to retain. Default 300. */
   truncateHeadChars?: number;
+  /** Content the host keeps beside tool results (see AttachedContent). Default none. */
+  attached?: readonly AttachedContent[];
 }
 
 export interface ResolvedCompactOptions {
@@ -114,6 +142,7 @@ export interface ResolvedCompactOptions {
   maxStateTokens: number;
   maxRequestTokens: number;
   truncateHeadChars: number;
+  attached: readonly AttachedContent[];
 }
 
 export interface CompactResult {
@@ -130,6 +159,10 @@ export interface CompactResult {
     resultsDropped: number;
     callsDropped: number;
     pinned: number;
+    /** Calls kept because their attached content could not be put back. */
+    protected: number;
+    /** Attached contents put back as text after their rebuilt or removed results. */
+    carried: number;
     stateTokens: number;
     /** Which fitting stage the state needed, '' when no request was made. */
     stateStage: string;

@@ -51,7 +51,13 @@ built-in compaction summary with the original messages.
    - else → remove the call together with its result.
 7. The message list is rebuilt: a message that loses all its content is
    removed, untouched messages are returned as the same objects, and no result
-   is ever left without its call.
+   is ever left without its call. A dropped result leaves its call's message
+   untouched.
+8. Content the host keeps outside the messages, beside some tool results
+   (`attached`; in Claude Code the reminders, messages typed while a tool ran,
+   and skill bodies), is never lost: when every message holding those results
+   is rebuilt or removed, its text is put back right after them; otherwise, or
+   when it has no text form, those calls are kept (`protected`).
 
 Jev failures, malformed answers, a missing key, or a history that cannot be
 fitted throw; the caller (or the Claude Code hook) decides what to fall back to.
@@ -110,6 +116,7 @@ put it in a source file.
 | `maxStateTokens` | `25000` | Estimated token ceiling for the state |
 | `maxRequestTokens` | `30000` | Estimated ceiling for state plus one batch of questions |
 | `truncateHeadChars` | `300` | Characters of a dropped tool result retained before its note |
+| `attached` | none | Content kept beside tool results outside the messages (`{ toolUseIds, text? }`) |
 
 `result.stats` reports message and character counts before and after, the
 per-reason decision counts, the state size in estimated tokens, which fitting
@@ -135,7 +142,7 @@ Claude Code 2.1.292 type reference.
 
 ### Install in Claude Code
 
-Function hooks are an early-access Claude Code feature (2.1.274+), so the
+Function hooks are an early-access Claude Code feature (2.1.274+; the hook needs 2.1.292+ and falls back to the built-in summary on older builds), so the
 opt-in flag must be set wherever Claude Code runs, e.g. in `~/.claude/settings.json`:
 
 ```json

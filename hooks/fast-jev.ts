@@ -11,6 +11,7 @@ import type {
 import { compact, reductionRatio, resolveOptions } from '../src/compact.js';
 import { buildJevRequest, DEFAULT_MODEL, parseJevResponse } from '../src/request.js';
 import type {
+  AttachedContent,
   CompactOptions,
   CompactResult,
   JevAsker,
@@ -156,6 +157,113 @@ export function toSessionMessages(
   });
 }
 
+/** One content block of the Messages API form (`$.session.messages({ as: 'api' })`). */
+export type ApiBlock = { type: string; [field: string]: unknown };
+
+/** One message of the Messages API form, as the next request is built from it. */
+export type ApiMessage = { role: 'user' | 'assistant'; content: ApiBlock[] };
+
+/**
+ * Claude Code hands `session.compact` one row per user or assistant message
+ * and keeps every other message of the transcript (attachments such as the
+ * reminders and the messages the user typed while a tool ran, and meta user
+ * messages such as skill bodies) beside the row before it. A row handed back
+ * unchanged with its handle brings them back; a row rebuilt or left out loses
+ * them, and the rows do not show them. The API form does: they are rendered
+ * there into the user message that holds the tool results before them, folded
+ * into a tool_result's text after the result itself, or as blocks of their own
+ * after the results.
+ *
+ * Reads that content for each API user message holding tool results of the
+ * rows, as AttachedContent: its text when it is text, no text when it is not
+ * (an image) or cannot be told apart from the results (the calls are then
+ * kept). A result the API form does not show is kept too.
+ */
+export function attachedContent(
+  rows: readonly SessionMessage[],
+  view: readonly ApiMessage[],
+): AttachedContent[] {
+  const own = new Map<string, string>();
+  const texts = new Map<string, number>();
+  for (const row of rows) {
+    for (const result of row.toolResults ?? []) own.set(result.tool_use_id, result.text.trim());
+    const text = row.role === 'user' ? row.text.trim() : '';
+    if (text) texts.set(text, (texts.get(text) ?? 0) + 1);
+  }
+  const ownText = (text: string): boolean => {
+    const left = texts.get(text) ?? 0;
+    if (left === 0) return false;
+    texts.set(text, left - 1);
+    return true;
+  };
+  const textOf = (content: unknown): string =>
+    typeof content === 'string'
+      ? content
+      : Array.isArray(content)
+        ? content
+            .filter((block): block is { type: 'text'; text: unknown } => block?.type === 'text')
+            .map((block) => String(block.text ?? ''))
+            .join('\n')
+        : '';
+
+  const attached: AttachedContent[] = [];
+  const shown = new Set<string>();
+  for (const message of view) {
+    if (message.role !== 'user' || !Array.isArray(message.content)) continue;
+    const ids = message.content.flatMap((block) =>
+      block.type === 'tool_result' && typeof block['tool_use_id'] === 'string' && own.has(block['tool_use_id'])
+        ? [block['tool_use_id']]
+        : [],
+    );
+    if (ids.length === 0) continue;
+    for (const id of ids) shown.add(id);
+    const extra: string[] = [];
+    let readable = true;
+    for (const block of message.content) {
+      if (block.type === 'tool_result') {
+        const id = block['tool_use_id'];
+        const mine = typeof id === 'string' ? own.get(id) : undefined;
+        if (mine === undefined) {
+          readable = false;
+          continue;
+        }
+        const text = textOf(block['content']);
+        if (text.trim() === mine) continue;
+        if (text.startsWith(mine)) {
+          const rest = text.slice(mine.length).trim();
+          if (rest) extra.push(rest);
+        } else readable = false;
+      } else if (block.type === 'text') {
+        const text = String(block['text'] ?? '').trim();
+        if (text && !ownText(text)) extra.push(text);
+      } else {
+        readable = false;
+      }
+    }
+    if (!readable) attached.push({ toolUseIds: ids });
+    else if (extra.length > 0) attached.push({ toolUseIds: ids, text: extra.join('\n\n') });
+  }
+  for (const id of own.keys()) if (!shown.has(id)) attached.push({ toolUseIds: [id] });
+  return attached;
+}
+
+type ApiViewSource = {
+  session: { messages: (args: { as: 'api'; agentId?: string }) => Promise<unknown> };
+};
+
+/** The conversation being compacted in API form; throws when the host does not give it. */
+export async function apiView($: ApiViewSource, agentId?: string): Promise<ApiMessage[]> {
+  const view = await $.session.messages(agentId === undefined ? { as: 'api' } : { as: 'api', agentId });
+  if (!Array.isArray(view)) {
+    const deny = (view as { deny?: unknown } | null)?.deny;
+    throw new Error(`no API view of the conversation${typeof deny === 'string' ? ` (${deny})` : ''}`);
+  }
+  if (!view.every((message) => Array.isArray((message as { content?: unknown })?.content))) {
+    throw new Error('no API view of the conversation (this Claude Code answers rows only)');
+  }
+  return view as ApiMessage[];
+}
+
 export type SessionCompaction = {
   result: CompactResult;
   messages: SessionMessage[];
@@ -183,6 +291,8 @@ export function summarize(result: CompactResult): string {
     stats.resultsDropped > 0 ? `${stats.resultsDropped} results truncated` : '',
     stats.callsDropped > 0 ? `${stats.callsDropped} call_dropped` : '',
     stats.pinned > 0 ? `${stats.pinned} pinned` : '',
+    stats.protected > 0 ? `${stats.protected} protected` : '',
+    stats.carried > 0 ? `${stats.carried} attached put back` : '',
   ].filter(Boolean);
   return `${percent(reductionRatio(result))} reduction; ${
     parts.join(', ') || 'no tool calls'
@@ -258,7 +368,10 @@ export const register: Register = (on: On, options: PluginOptions) => {
 
   on('session.compact', async ($, event, next) => {
     try {
-      const config = { ...configured, apiKey: await getApiKey($, configured) };
+      const apiKey = await getApiKey($, configured);
+      // What Claude Code keeps beside the rows; a row rebuilt or left out would lose it.
+      const attached = attachedContent(event.messages, await apiView($, event.agentId));
+      const config = { ...configured, apiKey, attached };
       const { result, messages } = await compactSession(event.messages, config, async (url, init) => {
         const response = await $.http.fetch(url, init);
         return { status: response.status, ok: response.ok, text: response.text };

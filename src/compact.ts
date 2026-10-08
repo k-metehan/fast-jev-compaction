@@ -43,6 +43,14 @@ export const MAX_CONCURRENT_REQUESTS = 8;
 /** The wait before a failed request is tried again, when `after` is given. */
 export const RETRY_DELAY_MS = 1_000;
 
+/** `options.signal` aborted: whoever asked for the compaction moved on. */
+export class CompactionInterrupted extends Error {
+  constructor() {
+    super('compaction interrupted');
+    this.name = 'CompactionInterrupted';
+  }
+}
+
 /** The Jev requests outran `deadlineMs`. */
 export class JevDeadlineError extends Error {
   constructor(ms: number) {
@@ -172,12 +180,14 @@ async function askWithRetry(
   state: CompactionState,
   batch: readonly ToolCall[],
   wait: (ms: number) => Promise<void>,
+  signal: AbortSignal | undefined,
 ): Promise<Map<string, CallAnswer>> {
   try {
     return await askBatch(asker, state, batch);
   } catch (error) {
     if (!isRetryable(error)) throw error;
     await wait(RETRY_DELAY_MS);
+    if (signal?.aborted) throw new CompactionInterrupted();
     return askBatch(asker, state, batch);
   }
 }
@@ -436,7 +446,8 @@ function count(decisions: readonly CallDecision[], reason: CallDecision['reason'
  * limited (429) or hits a server error (5xx) is tried once more. A request
  * unauthorized (401, 403) or unanswered stops the ones not yet started. The
  * calls of a request that fails are kept. Past `deadlineMs` (with `after`)
- * compact throws. Throws when no request is answered,
+ * compact throws; when `signal` aborts it stops at once and throws
+ * CompactionInterrupted. Throws when no request is answered,
  * Jev answers malformed, or the history cannot be fitted; the caller decides
  * whether to fall back.
  */
@@ -468,34 +479,50 @@ export async function compact(
     const state = fitState(messages, calls, resolved);
     fitted = state;
     batches = batchCalls(candidates, state.tokens, resolved);
-    const after = options.after;
+    const { after, signal } = options;
+    if (signal?.aborted) throw new CompactionInterrupted();
+    // A wait ends early when the signal aborts.
     const wait = (ms: number): Promise<void> =>
-      after ? new Promise<void>((resolve) => void after(ms, resolve)) : Promise.resolve();
+      after
+        ? new Promise<void>((resolve) => {
+            let timer: { cancel: () => void } | undefined;
+            const done = (): void => {
+              timer?.cancel();
+              signal?.removeEventListener('abort', done);
+              resolve();
+            };
+            signal?.addEventListener('abort', done, { once: true });
+            timer = after(ms, done);
+          })
+        : Promise.resolve();
     // After a failure every other request would share, start no more.
     let stop: unknown;
     const work = settleLimited(batches, MAX_CONCURRENT_REQUESTS, async (batch) => {
       if (stop !== undefined) throw stop;
       try {
-        return await askWithRetry(asker, state.state, batch, wait);
+        return await askWithRetry(asker, state.state, batch, wait, signal);
       } catch (error) {
         if (stopsAll(error)) stop ??= error;
         throw error;
       }
     });
     let timer: { cancel: () => void } | undefined;
-    const deadline = new Promise<never>((_, reject) => {
-      if (!after) return;
-      timer = after(resolved.deadlineMs, () => {
-        const error = new JevDeadlineError(resolved.deadlineMs);
+    let onAbort: (() => void) | undefined;
+    const cut = new Promise<never>((_, reject) => {
+      const give = (error: Error): void => {
         stop ??= error;
         reject(error);
-      });
+      };
+      if (after) timer = after(resolved.deadlineMs, () => give(new JevDeadlineError(resolved.deadlineMs)));
+      onAbort = () => give(new CompactionInterrupted());
+      signal?.addEventListener('abort', onAbort, { once: true });
     });
     let settled: Awaited<typeof work>;
     try {
-      settled = await Promise.race([work, deadline]);
+      settled = await Promise.race([work, cut]);
     } finally {
       timer?.cancel();
+      if (onAbort) signal?.removeEventListener('abort', onAbort);
     }
     for (const outcome of settled) {
       if (outcome.status === 'rejected') failures.push(outcome.reason);

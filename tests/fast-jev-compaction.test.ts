@@ -5,6 +5,7 @@ import {
   buildJevRequest,
   collectToolCalls,
   compact,
+  CompactionInterrupted,
   compactMessages,
   decideCall,
   estimateTokens,
@@ -539,7 +540,7 @@ describe('requests', () => {
     return { asker, attempts, most: () => most };
   }
 
-  it('runs at most four requests at once', async () => {
+  it('runs at most eight requests at once', async () => {
     const { messages, options } = oneCallPerRequest(10);
     const jev = flaky(() => undefined);
     const output = await compact(messages, jev.asker, options);
@@ -620,6 +621,31 @@ describe('requests', () => {
     timers.length = 0;
     await compact(messages, flaky(() => undefined).asker, { ...options, after, deadlineMs: 60_000 });
     expect(timers).toEqual([{ ms: 60_000, cancelled: true }]);
+  });
+
+  it('stops at once when its signal aborts: no request, no retry, nothing new started', async () => {
+    const { messages, options } = oneCallPerRequest(10);
+    const before = flaky(() => undefined);
+    await expect(compact(messages, before.asker, { ...options, signal: AbortSignal.abort() })).rejects.toBeInstanceOf(
+      CompactionInterrupted,
+    );
+    expect(before.attempts.size).toBe(0);
+
+    // t1 fails with a 503 and the person presses Esc during its retry wait,
+    // a wait that would otherwise never end.
+    const controller = new AbortController();
+    const jev = flaky((id) => {
+      if (id !== 't1') return undefined;
+      controller.abort();
+      return new JevRequestError(503, 'busy');
+    });
+    const after = () => ({ cancel: () => undefined });
+    await expect(compact(messages, jev.asker, { ...options, after, signal: controller.signal })).rejects.toBeInstanceOf(
+      CompactionInterrupted,
+    );
+    expect(jev.attempts.get('t1')).toBe(1);
+    // The eight started before the abort; the last two never did.
+    expect(jev.attempts.size).toBe(MAX_CONCURRENT_REQUESTS);
   });
 
   it('throws when no request is answered', async () => {

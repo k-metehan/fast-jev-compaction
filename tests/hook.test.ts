@@ -158,6 +158,7 @@ describe('session.compact hook', () => {
     fetch: (url: string, init?: { body?: string }) => Promise<{ status: number; ok: boolean; text: string }>,
     files: Map<string, string> = new Map(),
     event: { instructions?: string } = {},
+    signal?: AbortSignal,
   ) {
     const handlers: Record<string, Function> = {};
     register(((name: string, h: Function) => { handlers[name] = h; }) as never, { preserveRecentMessages: 1 } as never);
@@ -202,12 +203,24 @@ describe('session.compact hook', () => {
         toast: (text: string) => toasts.push(text),
       },
     };
-    return handlers['session.compact']($, { trigger: 'manual', messages: transcript(), ...event }, async () => ({})).then(() => ({
-      logs,
-      toasts,
-      sleeps,
-      lines: (files.get(LOG) ?? '').split('\n').filter(Boolean),
-    }));
+    let nextCalls = 0;
+    const next = Object.assign(
+      async () => {
+        nextCalls += 1;
+        return {};
+      },
+      { signal: signal ?? new AbortController().signal },
+    );
+    return handlers['session.compact']($, { trigger: 'manual', messages: transcript(), ...event }, next).then(
+      (returned: unknown) => ({
+        returned,
+        nextCalls,
+        logs,
+        toasts,
+        sleeps,
+        lines: (files.get(LOG) ?? '').split('\n').filter(Boolean),
+      }),
+    );
   }
 
   it('shows only "compaction done" and logs the outcome to the debug log and its own log', async () => {
@@ -241,6 +254,26 @@ describe('session.compact hook', () => {
     expect(calls).toBe(2);
     expect(sleeps).toEqual([45_000, 1000]);
     expect(lines[0]).toMatch(/fallback to built-in summary \(Jev request failed \(503\): busy\)$/);
+  });
+
+  it('stops when Claude Code moves on (Esc, budget), logs it as interrupted, and runs no summary', async () => {
+    const controller = new AbortController();
+    let calls = 0;
+    const { returned, nextCalls, toasts, lines } = await run(
+      async () => {
+        calls += 1;
+        controller.abort();
+        return { status: 503, ok: false, text: 'busy' };
+      },
+      new Map(),
+      {},
+      controller.signal,
+    );
+    expect(calls).toBe(1);
+    expect(nextCalls).toBe(0);
+    expect(returned).toEqual({ skip: 'interrupted' });
+    expect(toasts).toEqual([]);
+    expect(lines).toEqual([expect.stringMatching(/Z manual interrupted: Claude Code moved on before the compaction finished; nothing handed back$/)]);
   });
 
   it('keeps its own log to the newest lines, one per compaction', async () => {

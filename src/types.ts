@@ -157,6 +157,11 @@ export interface CompactOptions {
    * (throws, so the caller falls back). Default 45000; needs `after`.
    */
   deadlineMs?: number;
+  /**
+   * Aborting it stops the compaction at once: no further request or retry,
+   * and compact throws CompactionInterrupted (a hook's `next.signal`).
+   */
+  signal?: AbortSignal;
 }
 
 export interface ResolvedCompactOptions {

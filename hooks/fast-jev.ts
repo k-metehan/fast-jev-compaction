@@ -8,7 +8,7 @@ import type {
   TurnCompleteInput,
 } from 'claude-code';
 
-import { compact, reductionRatio, resolveOptions } from '../src/compact.js';
+import { compact, CompactionInterrupted, reductionRatio, resolveOptions } from '../src/compact.js';
 import { buildJevRequest, DEFAULT_MODEL, JevTransportError, parseJevResponse } from '../src/request.js';
 import type {
   AttachedContent,
@@ -584,6 +584,12 @@ export const register: Register = (on: On, options: PluginOptions) => {
       debugLog($, text);
       await appendCompactionLog($, `${which} ${text}`);
     };
+    // Esc, a hook above that settled first, or the budget: Claude Code has moved
+    // on, so stop, log it as such, and hand back nothing it would act on.
+    const interrupted = async () => {
+      await report('interrupted: Claude Code moved on before the compaction finished; nothing handed back');
+      return { skip: 'interrupted' };
+    };
     try {
       const apiKey = await getApiKey($, configured);
       const view = await apiView($, event.agentId);
@@ -598,12 +604,14 @@ export const register: Register = (on: On, options: PluginOptions) => {
         // Timers for the retry wait and the deadline. Not $.clock.sleep: the
         // hook's 10 s budget runs on through a sleep, not through a fetch.
         after: (ms, fn) => $.clock.after(ms, fn),
+        signal: next.signal,
       };
       const fetchFn: HookFetch = async (url, init) => {
         const response = await $.http.fetch(url, init);
         return { status: response.status, ok: response.ok, text: response.text };
       };
       const { result, messages } = await compactSession(event.messages, config, fetchFn, resultImages(view));
+      if (next.signal?.aborted) return await interrupted();
       if (reductionRatio(result) < config.minReductionRatio) {
         // The API form holds the newest 4096 messages: older results are kept unseen.
         const outside = resultsOutsideView(event.messages, view);
@@ -620,6 +628,7 @@ export const register: Register = (on: On, options: PluginOptions) => {
       $.ui.toast('compaction done');
       return { messages };
     } catch (error) {
+      if (error instanceof CompactionInterrupted || next.signal?.aborted) return await interrupted();
       await report(`fallback to built-in summary (${error instanceof Error ? error.message : String(error)})`);
       return next(event);
     }

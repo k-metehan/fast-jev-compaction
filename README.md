@@ -24,7 +24,8 @@ built-in compaction summary with the original messages.
    the first message or in the newest `preserveRecentMessages` messages are
    pinned and never touched.
 2. The **state** sent to Jev is the whole conversation so far, oldest first,
-   with every tool result replaced by a short note (`ok, 4213 chars (omitted)`).
+   with every tool result replaced by a short note (`ok, 4213 chars (omitted)`,
+   or `ok, 16 chars + 1 image (omitted)` for a screenshot).
    Tool inputs are included, texts are included, nothing is summarized.
 3. The state is fitted into `maxStateTokens` (25k by default) in stages, each
    applied only if the previous one was not enough: tool inputs truncated to
@@ -47,7 +48,9 @@ built-in compaction summary with the original messages.
 6. Decisions per call, against `keepThreshold`:
    - `keepResult ≥ threshold` → keep call and result;
    - else `keepCall ≥ threshold` → keep the call, truncate the result to its
-     first `truncateHeadChars` characters plus a one-line note;
+     first `truncateHeadChars` characters plus a one-line note, and remove
+     its images (a result's `images` count; each counts as `IMAGE_CHARS`,
+     6000 characters, in the reduction);
    - else → remove the call together with its result.
 7. The message list is rebuilt: a message that loses all its content is
    removed, untouched messages are returned as the same objects, and no result
@@ -126,7 +129,8 @@ stage was needed, and the number of requests.
 
 - Only tool calls and results are candidates; text messages are never removed
   or shortened in the output (they are only abridged in the state Jev sees).
-- Token sizes are estimates from character counts, not a tokenizer.
+- Token sizes are estimates from character counts, not a tokenizer; an image
+  counts as a fixed 6000 characters.
 - Calibration is at the request level; a probability is not a proof that a
   result is safe to delete. The assistant can always re-run the tool.
 - The full state is repeated with every request, so a history near the state

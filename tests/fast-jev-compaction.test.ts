@@ -9,7 +9,10 @@ import {
   decideCall,
   estimateTokens,
   fitState,
+  IMAGE_CHARS,
   JevClient,
+  messageChars,
+  questionsFor,
   rebuild,
   parseJevResponse,
   reductionRatio,
@@ -348,6 +351,27 @@ describe('decisions', () => {
     const held = rebuild(messages, drop('drop_call'), calls, 300, [{ toolUseIds: ['tool-3'] }]);
     expect(held.decisions[2]).toMatchObject({ action: 'keep', reason: 'protected' });
     expect(held.messages).toContain(messages[7]);
+  });
+
+  it('counts the images of a result, tells Jev about them, and strips them from a dropped result', () => {
+    const messages = transcript();
+    messages[2] = result('tool-1', 'Screenshot taken');
+    messages[2].toolResults![0]!.images = 2;
+    const calls = collectToolCalls(messages, 0);
+    expect(calls[0]?.resultImages).toBe(2);
+    expect(messageChars(messages[2])).toBe('Screenshot taken'.length + 2 * IMAGE_CHARS);
+    expect(JSON.stringify(questionsFor(calls[0]!))).toContain('16 chars and 2 images');
+    expect(JSON.stringify(fitState(messages, calls, fit).state)).toContain('ok, 16 chars + 2 images (omitted)');
+
+    const decisions = [decideCall(calls[0]!, { keepCall: 0.9, keepResult: 0.1 }, options)];
+    const kept = applyDecisions(messages, decisions, calls, 300);
+    expect(kept[2]).not.toBe(messages[2]);
+    expect(kept[2]?.toolResults?.[0]).toEqual({
+      tool_use_id: 'tool-1',
+      text: 'Screenshot taken\n[fast-jev-compaction removed 2 images from this tool result; re-run the tool if needed]',
+      isError: false,
+    });
+    expect(messageChars(kept[2]!)).toBeLessThan(IMAGE_CHARS);
   });
 
   it('honours truncateHeadChars, including a zero head', () => {

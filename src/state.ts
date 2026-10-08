@@ -82,6 +82,7 @@ export function collectToolCalls(
         callIndex,
         resultIndex: found.index,
         resultChars: found.result.text.length,
+        resultImages: found.result.images ?? 0,
         isError: found.result.isError ?? false,
         pinned:
           isPinned(callIndex, messages.length, preserveRecentMessages) ||
@@ -102,8 +103,15 @@ function inputText(input: Record<string, unknown>, limit: number): string {
   return truncate(json, limit);
 }
 
+/** `2 images`, for a result's size; '' when it has none. */
+export function imageCount(images: number | undefined): string {
+  const n = images ?? 0;
+  return n > 0 ? `${n} image${n === 1 ? '' : 's'}` : '';
+}
+
 function resultNote(call: ToolCall): string {
-  return `${call.isError ? 'error' : 'ok'}, ${call.resultChars} chars (omitted)`;
+  const images = imageCount(call.resultImages);
+  return `${call.isError ? 'error' : 'ok'}, ${call.resultChars} chars${images ? ` + ${images}` : ''} (omitted)`;
 }
 
 /** One call as a single line, for when the structured form is too costly. */
@@ -116,7 +124,7 @@ function compactCall(call: ToolCall): string {
     .join(' ');
   return `${call.id} ${call.tool} ${truncate(input, INPUT_CHARS[2])} → ${
     call.isError ? 'error' : 'ok'
-  } ${call.resultChars}ch`;
+  } ${call.resultChars}ch${call.resultImages ? `+${call.resultImages}img` : ''}`;
 }
 
 /**

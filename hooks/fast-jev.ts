@@ -126,20 +126,24 @@ function toolResultSummary(result: ToolResult): ToolResultSummary {
  * Maps the library's output back onto session messages. Whatever came back
  * unchanged (a message, a tool use, a tool result) is the engine's own object,
  * handle included; anything rebuilt is a fresh message without a handle, so the
- * engine takes the edited content instead of its original.
+ * engine takes the edited content instead of its original. `libraryInput` is
+ * what the library was given, index for index (copies of `input` where the
+ * hook added what the rows do not show); it maps back onto `input`.
  */
 export function toSessionMessages(
   input: readonly SessionMessage[],
   output: readonly Message[],
+  libraryInput: readonly Message[] = input,
 ): SessionMessage[] {
   const messages = new Map<Message, SessionMessage>();
   const uses = new Map<ToolUse, ToolUseSummary>();
   const results = new Map<ToolResult, ToolResultSummary>();
-  for (const message of input) {
-    messages.set(message, message);
-    for (const tool of message.toolUses) uses.set(tool, tool);
-    for (const result of message.toolResults ?? []) results.set(result, result);
-  }
+  input.forEach((message, index) => {
+    const given = libraryInput[index] ?? message;
+    messages.set(given, message);
+    message.toolUses.forEach((tool, n) => uses.set(given.toolUses[n] ?? tool, tool));
+    (message.toolResults ?? []).forEach((result, n) => results.set(given.toolResults?.[n] ?? result, result));
+  });
   return output.map((message) => {
     const own = messages.get(message);
     if (own) return own;
@@ -247,6 +251,25 @@ export function attachedContent(
   return attached;
 }
 
+/**
+ * The image blocks inside each tool result, by tool_use_id. The rows hold a
+ * result's text blocks only, so a screenshot is invisible there.
+ */
+export function resultImages(view: readonly ApiMessage[]): Map<string, number> {
+  const images = new Map<string, number>();
+  for (const message of view) {
+    if (message.role !== 'user' || !Array.isArray(message.content)) continue;
+    for (const block of message.content) {
+      const id = block['tool_use_id'];
+      const content = block['content'];
+      if (block.type !== 'tool_result' || typeof id !== 'string' || !Array.isArray(content)) continue;
+      const n = content.filter((part) => (part as { type?: unknown } | null)?.type === 'image').length;
+      if (n > 0) images.set(id, n);
+    }
+  }
+  return images;
+}
+
 type ApiViewSource = {
   session: { messages: (args: { as: 'api'; agentId?: string }) => Promise<unknown> };
 };
@@ -269,15 +292,31 @@ export type SessionCompaction = {
   messages: SessionMessage[];
 };
 
-/** Runs the library over a session transcript; throws when the key is missing or Jev fails. */
+/**
+ * Runs the library over a session transcript; throws when the key is missing
+ * or Jev fails. `images` are the image blocks of tool results, by tool_use_id
+ * (resultImages): the library is given copies of those rows that carry them,
+ * and the engine's rows come back where nothing changed.
+ */
 export async function compactSession(
   messages: readonly SessionMessage[],
   config: HookConfig,
   fetchFn: HookFetch,
+  images: ReadonlyMap<string, number> = new Map(),
 ): Promise<SessionCompaction> {
   if (!config.apiKey) throw new Error('TYPESAFE_API_KEY is not configured');
-  const result = await compact(messages, jevAsker(fetchFn, config.apiKey, config.model), config);
-  return { result, messages: toSessionMessages(messages, result.messages) };
+  const given: Message[] = messages.map((message) =>
+    (message.toolResults ?? []).some((result) => images.has(result.tool_use_id))
+      ? {
+          ...message,
+          toolResults: (message.toolResults ?? []).map((result) =>
+            images.has(result.tool_use_id) ? { ...result, images: images.get(result.tool_use_id) } : result,
+          ),
+        }
+      : message,
+  );
+  const result = await compact(given, jevAsker(fetchFn, config.apiKey, config.model), config);
+  return { result, messages: toSessionMessages(messages, result.messages, given) };
 }
 
 function percent(ratio: number): string {
@@ -420,13 +459,15 @@ export const register: Register = (on: On, options: PluginOptions) => {
     };
     try {
       const apiKey = await getApiKey($, configured);
+      const view = await apiView($, event.agentId);
       // What Claude Code keeps beside the rows; a row rebuilt or left out would lose it.
-      const attached = attachedContent(event.messages, await apiView($, event.agentId));
+      const attached = attachedContent(event.messages, view);
       const config = { ...configured, apiKey, attached };
-      const { result, messages } = await compactSession(event.messages, config, async (url, init) => {
+      const fetchFn: HookFetch = async (url, init) => {
         const response = await $.http.fetch(url, init);
         return { status: response.status, ok: response.ok, text: response.text };
-      });
+      };
+      const { result, messages } = await compactSession(event.messages, config, fetchFn, resultImages(view));
       if (reductionRatio(result) < config.minReductionRatio) {
         await report(
           `fallback to built-in summary (below ${percent(config.minReductionRatio)} minimum: ${summarize(result)})`,

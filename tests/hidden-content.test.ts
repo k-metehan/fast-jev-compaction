@@ -233,3 +233,41 @@ describe('attachedContent', () => {
     expect(attachedContent([row('x', 'out'), row('z', 'zz')], [image])).toEqual([{ toolUseIds: ['x'] }, { toolUseIds: ['z'] }]);
   });
 });
+
+describe('images in tool results', () => {
+  function screenshots() {
+    const t = transcriptBuilder();
+    const shot = (id: string): Raw => ({
+      type: 'user',
+      uuid: `shot-${id}`,
+      toolUseResult: { type: 'image' },
+      message: {
+        content: [
+          {
+            type: 'tool_result',
+            tool_use_id: id,
+            content: [
+              { type: 'image', source: { type: 'base64', media_type: 'image/png', data: 'iVBORw0KGgo=' } },
+              { type: 'text', text: 'Screenshot taken' },
+            ],
+          },
+        ],
+      },
+    });
+    const raw: Raw[] = [t.prompt('Check the page')];
+    for (const id of ['t1', 't2', 't3', 't4']) raw.push(t.thinking(), t.use(id, 'screenshot', {}), shot(id));
+    raw.push(t.say('done'));
+    return raw;
+  }
+
+  it('counts screenshots in the reduction and drops their images with the result', async () => {
+    const raw = screenshots();
+    const { final, out, logs } = await compactThroughHook(raw, answers('drop_result', ['t1', 't2']));
+    expect(out.messages).toBeDefined();
+    // Two of four screenshots go: about half the size, though their text is 16 chars.
+    expect(logs.join('\n')).toMatch(/kept \d+\/\d+ messages, no summary \((4\d|5\d)% reduction; .*2 results truncated/);
+    expect(count(final, 'removed 1 image from this tool result')).toBe(2);
+    expect(count(final, '"media_type":"image/png"')).toBe(2);
+    expect(final).toContain(raw.find((entry) => entry.uuid === 'shot-t3'));
+  });
+});

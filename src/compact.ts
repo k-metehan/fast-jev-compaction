@@ -1,5 +1,5 @@
 import { noulAnswer } from './request.js';
-import { collectToolCalls, estimateTokens, fitState } from './state.js';
+import { collectToolCalls, estimateTokens, fitState, imageCount } from './state.js';
 import type {
   AttachedContent,
   CallAction,
@@ -24,6 +24,12 @@ export const DEFAULT_OPTIONS: ResolvedCompactOptions = {
   truncateHeadChars: 300,
   attached: [],
 };
+
+/**
+ * What one image in a tool result counts for in the size math, in characters:
+ * about the 1,600 tokens Claude reads a full-size image as.
+ */
+export const IMAGE_CHARS = 6_000;
 
 /** Tokens the request envelope (`model`, key names) adds around state and questions. */
 const REQUEST_OVERHEAD_TOKENS = 20;
@@ -64,7 +70,9 @@ export function questionsFor(call: ToolCall): JevQuestions {
     },
     [`result_${call.id}`]: {
       type: 'noul',
-      instructions: `The full output of tool call ${call.id} (${call.tool}, ${call.resultChars} chars) should stay in the history verbatim: the assistant still needs its contents and re-running the tool would not do`,
+      instructions: `The full output of tool call ${call.id} (${call.tool}, ${call.resultChars} chars${
+        call.resultImages ? ` and ${imageCount(call.resultImages)}` : ''
+      }) should stay in the history verbatim: the assistant still needs its contents and re-running the tool would not do`,
     },
   };
 }
@@ -169,13 +177,17 @@ function rewriteMessage(
     .map((result) => {
       if (actions.get(result.tool_use_id) !== 'drop_result') return result;
       const text = truncatedResultText(result.text, result.isError ?? false, headChars);
-      return text === result.text
-        ? result
-        : {
-            tool_use_id: result.tool_use_id,
-            text,
-            isError: result.isError,
-          };
+      const images = imageCount(result.images);
+      if (text === result.text && !images) return result;
+      // A dropped result loses its images whatever its length; the note says so.
+      const note = images
+        ? `[fast-jev-compaction removed ${images} from this tool result; re-run the tool if needed]`
+        : '';
+      return {
+        tool_use_id: result.tool_use_id,
+        text: [text, note].filter((part) => part.length > 0).join('\n'),
+        isError: result.isError,
+      };
     });
   if (
     toolUses.length === message.toolUses.length &&
@@ -312,7 +324,7 @@ export function applyDecisions(
   return rebuild(messages, decisions, calls, headChars, attached).messages;
 }
 
-/** Characters of text, tool input and tool output a message holds. */
+/** Characters of text, tool input and tool output a message holds; an image counts IMAGE_CHARS. */
 export function messageChars(message: Message): number {
   let total = message.text.length;
   for (const tool of message.toolUses) {
@@ -322,7 +334,9 @@ export function messageChars(message: Message): number {
       total += 20;
     }
   }
-  for (const result of message.toolResults ?? []) total += result.text.length;
+  for (const result of message.toolResults ?? []) {
+    total += result.text.length + IMAGE_CHARS * Math.max(0, result.images ?? 0);
+  }
   return total;
 }
 

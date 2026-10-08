@@ -11,7 +11,9 @@ conversation as `state` (tool outputs replaced by a one-line note) and, for
 every tool call outside the pinned first and newest messages, two questions:
 whether the call should stay and whether its full output should stay. An
 item is kept when Jev's probability reaches `keepThreshold`; a dropped result
-is truncated to its first `truncateHeadChars` characters plus a one-line note,
+is truncated to its first `truncateHeadChars` characters plus a one-line note
+and loses its images (the hook counts them from the API form, since the rows
+hold a result's text only),
 and a dropped call disappears with its result.
 
 Claude Code hands the hook one row per user or assistant message and keeps

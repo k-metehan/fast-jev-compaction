@@ -15,8 +15,11 @@ export interface ToolUse {
 /** A tool_result block of a user message. */
 export interface ToolResult {
   tool_use_id: string;
+  /** Its text blocks; images are not in it. */
   text: string;
   isError?: boolean;
+  /** Image blocks it carries besides its text (a screenshot). Default 0. */
+  images?: number;
 }
 
 /**
@@ -42,6 +45,8 @@ export interface ToolCall {
   /** Index of the message holding the tool_result block. */
   resultIndex: number;
   resultChars: number;
+  /** Image blocks the result carries besides its text. */
+  resultImages?: number;
   isError: boolean;
   /** In the first or the newest preserved messages; never a candidate. */
   pinned: boolean;

@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   attachedContent,
+  classifyHidden,
   compactSession,
   register,
   resolveHookConfig,
@@ -112,22 +113,24 @@ describe('hidden messages beside a rewritten tool result (Claude Code 2.1.292)',
     }
   });
 
-  it('keeps the typed message and the skill body under drop_call, put back in place', async () => {
-    const { raw } = session();
+  it('under drop_call, puts the typed message back as the user\'s words and keeps the skill call', async () => {
+    const { raw, hidden } = session();
     const { out, final, toasts, logs } = await compactThroughHook(raw, answers('drop_call', ['t2', 't3']));
     expect(toasts).toEqual(['compaction done']);
     expect(out.messages).toBeDefined();
     expect(count(final, TYPED)).toBe(1);
     expect(count(final, SKILL)).toBe(1);
-    expect(logs.join('\n')).toMatch(/attached put back/);
-    // In place: after step 1's call, before step 3's thinking; after it, before step 4's call.
+    expect(logs.join('\n')).toMatch(/1 protected, 1 attached put back/);
+    // The prompt itself, as a user message, in place: after step 1, before step 3.
     const typedAt = indexOf(final, TYPED);
-    const skillAt = indexOf(final, SKILL);
+    expect(final[typedAt]).toMatchObject({ type: 'user', fresh: true, message: { content: TYPED } });
     expect(typedAt).toBeGreaterThan(indexOf(final, '"step 1"'));
-    expect(typedAt).toBeLessThan(skillAt);
-    expect(skillAt).toBeLessThan(indexOf(final, '"step 4"'));
+    expect(typedAt).toBeLessThan(indexOf(final, SKILL));
     expect(count(final, '"step 2"')).toBe(0);
-    expect(count(final, 'Launching skill')).toBe(0);
+    // Step 2's token countdown went with it; the skill body stays where the host keeps it.
+    expect(count(final, '899998 tokens left')).toBe(0);
+    expect(final).toContain(hidden[1]);
+    expect(count(final, '"skill":"deploy"')).toBe(1);
   });
 
   it('keeps the calls under drop_result, since their call rows (and what the host keeps there) survive', async () => {
@@ -248,11 +251,22 @@ describe('attachedContent', () => {
   const row = (id: string, text: string) => ({ role: 'user' as const, text: '', toolUses: [], toolResults: [{ tool_use_id: id, text, isError: false }] });
   const reminder = '<system-reminder>\n<total_tokens>5 tokens left</total_tokens>\n</system-reminder>';
 
-  it('reads text folded into a result after its own (trimmed) text', () => {
-    const view: ApiMessage[] = [
-      { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'x', content: `53M\tdir\n\n${reminder}` }] },
-    ];
-    expect(attachedContent([row('x', ' 53M\tdir\n')], view)).toEqual([{ toolUseIds: ['x'], text: reminder }]);
+  const typed = (prompt: string) =>
+    `<system-reminder>\nThe user sent a new message while you were working:\n${prompt}\n\nThis is how Claude Code surfaces messages the user sends mid-turn — within the running turn, often alongside the next tool result, rather than as a separate conversation turn. Address the message above as you continue this turn.\n</system-reminder>`;
+  const folded = (...pieces: string[]): ApiMessage[] => [
+    { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'x', content: ['53M\tdir', ...pieces].join('\n\n') }] },
+  ];
+
+  it('reads what is folded into a result after its own (trimmed) text: prompts back, countdowns go, the rest kept', () => {
+    expect(attachedContent([row('x', ' 53M\tdir\n')], folded(reminder))).toEqual([]);
+    expect(attachedContent([row('x', ' 53M\tdir\n')], folded(typed('homebrew is installed'), reminder))).toEqual([
+      { toolUseIds: ['x'], text: 'homebrew is installed' },
+    ]);
+    expect(
+      attachedContent([row('x', '53M\tdir')], folded(typed('a'), '<system-reminder>\n# Environment update\n</system-reminder>')),
+    ).toEqual([{ toolUseIds: ['x'] }]);
+    expect(attachedContent([row('x', '53M\tdir')], folded('Tool loaded.'))).toEqual([{ toolUseIds: ['x'] }]);
+    expect(classifyHidden(`\n${typed('two\n\nparagraphs')}\n`)).toEqual({ prompt: 'two\n\nparagraphs' });
   });
 
   it('reads blocks after the results, but not the text of a row of its own', () => {
@@ -268,9 +282,8 @@ describe('attachedContent', () => {
         ],
       },
     ];
-    expect(attachedContent([row('x', 'out'), row('y', 'out y'), prompt], view)).toEqual([
-      { toolUseIds: ['x', 'y'], text: SKILL },
-    ]);
+    // The skill body is not the user's words: those calls are kept.
+    expect(attachedContent([row('x', 'out'), row('y', 'out y'), prompt], view)).toEqual([{ toolUseIds: ['x', 'y'] }]);
     expect(attachedContent([row('x', 'out')], [{ role: 'user', content: [{ type: 'tool_result', tool_use_id: 'x', content: 'out' }] }])).toEqual([]);
   });
 

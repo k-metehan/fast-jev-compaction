@@ -203,6 +203,39 @@ function ownBlocksStart(blocks: readonly ApiBlock[], text: string): number {
 }
 
 /**
+ * How Claude Code 2.1.292 renders a message the user typed while a tool ran
+ * (a human queued_command): the prompt is the one capture.
+ */
+const QUEUED_PROMPT =
+  /^<system-reminder>\nThe user sent a new message while you were working:\n([\s\S]*?)\n\nThis is how Claude Code surfaces messages the user sends mid-turn — within the running turn, often alongside the next tool result, rather than as a separate conversation turn\. Address the message above as you continue this turn\.\n<\/system-reminder>$/;
+
+/** The token countdown the host adds after each step and sends again on the next one. */
+const TOKEN_COUNT = /^<system-reminder>\n<total_tokens>\d+ tokens left<\/total_tokens>\n<\/system-reminder>$/;
+
+/**
+ * What a piece of hidden content is, for compaction. The hook can only hand
+ * Claude Code a user or assistant message (its row format has no meta or
+ * origin), and a user message it builds counts as typed by the user. So only
+ * the user's own words are put back (`prompt`); a token countdown is let go
+ * (`drop`: the host sends a fresh one with every step, and the built-in
+ * summary drops it too); anything else (skill bodies, hook output, file
+ * contents, notices) keeps its calls (`keep`).
+ */
+export function classifyHidden(text: string): { prompt: string } | 'drop' | 'keep' {
+  const trimmed = text.trim();
+  const prompt = QUEUED_PROMPT.exec(trimmed);
+  if (prompt) return { prompt: prompt[1]! };
+  return TOKEN_COUNT.test(trimmed) ? 'drop' : 'keep';
+}
+
+/** A folded remainder as its <system-reminder> pieces, or null when anything else is in it. */
+function reminderPieces(text: string): string[] | null {
+  const pieces = text.match(/<system-reminder>[\s\S]*?<\/system-reminder>/g) ?? [];
+  const rest = pieces.reduce((left, piece) => left.replace(piece, ''), text);
+  return rest.trim() === '' ? pieces : null;
+}
+
+/**
  * Claude Code hands `session.compact` one row per user or assistant message
  * and keeps every other message of the transcript (reminders, messages the
  * user typed while a tool ran, skill bodies, hook output) in the group of the
@@ -216,10 +249,12 @@ function ownBlocksStart(blocks: readonly ApiBlock[], text: string): number {
  * For each API user message holding tool results of the rows, the content
  * that belongs to the calls' own rows (the tool_use rows and result rows, and
  * whatever lies between) is what precedes the first block of a user row that
- * follows the results: that row keeps its own blocks and group. That content
- * comes back as AttachedContent for the library, keyed by the message's calls:
- * its text, or no text when it cannot be told apart (the calls are then kept).
- * A result the API form does not show is kept too.
+ * follows the results: that row keeps its own blocks and group. Each piece of
+ * it is classified (classifyHidden). It comes back as AttachedContent for the
+ * library, keyed by the message's calls: the user's typed prompts as text to
+ * put back, or no text (the calls are kept) when any piece is something else
+ * or cannot be told apart. Token countdowns alone make no entry. A result the
+ * API form does not show is kept too.
  */
 export function attachedContent(
   rows: readonly SessionMessage[],
@@ -255,7 +290,12 @@ export function attachedContent(
 
     let readable =
       !rows.slice(first, last + 1).some(plainUserRow) && followers.every((row) => row.text.length > 0);
-    const extra: string[] = [];
+    const prompts: string[] = [];
+    const take = (piece: string): void => {
+      const kind = classifyHidden(piece);
+      if (kind === 'keep') readable = false;
+      else if (kind !== 'drop') prompts.push(kind.prompt);
+    };
     for (const block of message.content) {
       if (block.type !== 'tool_result') continue;
       const id = block['tool_use_id'];
@@ -267,8 +307,9 @@ export function attachedContent(
       const text = contentText(block['content']);
       if (text.trim() === mine) continue;
       if (text.startsWith(mine)) {
-        const rest = text.slice(mine.length).trim();
-        if (rest) extra.push(rest);
+        const pieces = reminderPieces(text.slice(mine.length));
+        if (pieces === null) readable = false;
+        else pieces.forEach(take);
       } else readable = false;
     }
     const others = message.content.filter((block) => block.type !== 'tool_result');
@@ -280,10 +321,10 @@ export function attachedContent(
         continue;
       }
       const text = String(block['text'] ?? '').trim();
-      if (text) extra.push(text);
+      if (text) take(text);
     }
     if (!readable) attached.push({ toolUseIds: ids });
-    else if (extra.length > 0) attached.push({ toolUseIds: ids, text: extra.join('\n\n') });
+    else if (prompts.length > 0) attached.push({ toolUseIds: ids, text: prompts.join('\n\n') });
   }
   for (const id of own.keys()) if (!shown.has(id)) attached.push({ toolUseIds: [id] });
   return attached;

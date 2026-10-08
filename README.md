@@ -60,11 +60,13 @@ built-in compaction summary with the original messages.
    removed, untouched messages are returned as the same objects, and no result
    is ever left without its call. A dropped result leaves its call's message
    untouched.
-8. Content the host keeps outside the messages, beside some tool results
-   (`attached`; in Claude Code the reminders, messages typed while a tool ran,
-   and skill bodies), is never lost: when every message holding those results
-   is rebuilt or removed, its text is put back right after them; otherwise, or
-   when it has no text form, those calls are kept (`protected`).
+8. Content the host keeps outside the messages, beside some tool calls
+   (`attached`; in Claude Code the messages typed while a tool ran, skill
+   bodies, reminders), is never lost: when every message from the first call
+   to the last result is rebuilt or removed, its text is put back right after
+   them; otherwise, or when it has no text to put back, those calls are kept
+   (`protected`). The Claude Code hook gives text only for the user's typed
+   words, keeps the calls for anything else, and lets token countdowns go.
 
 A Jev failure on every request, malformed answers, a missing key, or a
 history that cannot be fitted throw; the caller (or the Claude Code hook) decides what to fall back to.

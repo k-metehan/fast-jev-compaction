@@ -19,13 +19,19 @@ and a dropped call disappears with its result. The text after `/compact`
 
 Claude Code hands the hook one row per user or assistant message and keeps
 every other message (reminders, messages typed while a tool ran, skill
-bodies) beside the row before it; a row handed back rebuilt or left out
-loses them. The hook reads that content from the conversation's API form
-(`$.session.messages({ as: 'api' })`, Claude Code 2.1.292 or later) and hands
-it to the library as `attached`: when every result it sits beside is
-truncated or dropped, its text is put back right after them; when it is not
-text (an image) or cannot be told apart, those calls are kept. Without the
-API form the hook falls back to the built-in summary.
+bodies, hook output, file contents) beside the row before it; a row handed
+back rebuilt or left out loses them. The hook reads that content from the
+conversation's API form (`$.session.messages({ as: 'api' })`, Claude Code
+2.1.292 or later), attributing it to the call and result rows that hold it
+(not to a user row that follows them), and hands it to the library as
+`attached`. A message the hook builds counts as typed by the user (its row
+format has no meta or origin), so only the user's own words are put back: a
+message typed while a tool ran comes back as that user message, in place,
+when every row from the call to the result is dropped. A token countdown
+goes with its row (the host sends a fresh one each step, and the built-in
+summary drops it too). Anything else (a skill body, hook output, an image,
+content that cannot be told apart) keeps its calls. Without the API form the
+hook falls back to the built-in summary.
 
 The state is fitted into `maxStateTokens` in stages: tool inputs are
 truncated, then long texts are abridged (oldest first, pinned messages last),

@@ -243,17 +243,10 @@ async function getApiKey(
   return undefined;
 }
 
-function notify(
-  $: {
-    ui: {
-      log: (text: string) => void;
-      toast: (text: string, options?: { timeoutMs?: number }) => void;
-    };
-  },
-  text: string,
-): void {
-  $.ui.log(text);
-  $.ui.toast(text, { timeoutMs: 15_000 });
+// Details go to the debug log only; the user sees nothing but a short
+// "compaction done" toast when Jev's compaction replaced the history.
+function debugLog($: { ui: { log: (text: string, options?: { to?: 'debug' }) => void } }, text: string): void {
+  $.ui.log(text, { to: 'debug' });
 }
 
 export const register: Register = (on: On, options: PluginOptions) => {
@@ -271,22 +264,17 @@ export const register: Register = (on: On, options: PluginOptions) => {
         return { status: response.status, ok: response.ok, text: response.text };
       });
       if (reductionRatio(result) < config.minReductionRatio) {
-        notify(
+        debugLog(
           $,
           `fallback to built-in summary (below ${percent(config.minReductionRatio)} minimum: ${summarize(result)})`,
         );
         return next(event);
       }
-      notify(
-        $,
-        `kept ${messages.length}/${event.messages.length} messages, no summary (${summarize(result)})`,
-      );
+      debugLog($, `kept ${messages.length}/${event.messages.length} messages, no summary (${summarize(result)})`);
+      $.ui.toast('compaction done');
       return { messages };
     } catch (error) {
-      notify(
-        $,
-        `fallback to built-in summary (${error instanceof Error ? error.message : String(error)})`,
-      );
+      debugLog($, `fallback to built-in summary (${error instanceof Error ? error.message : String(error)})`);
       return next(event);
     }
   });
@@ -301,11 +289,7 @@ export const register: Register = (on: On, options: PluginOptions) => {
     } catch (error) {
       const text = error instanceof Error ? error.message : String(error);
       if (text.includes('headless')) headless = true;
-      $.ui.log(
-        headless
-          ? `auto-compact off for this session (${text})`
-          : `auto-compact skipped (${text})`,
-      );
+      debugLog($, headless ? `auto-compact off for this session (${text})` : `auto-compact skipped (${text})`);
     } finally {
       compacting = false;
     }

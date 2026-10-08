@@ -150,19 +150,34 @@ describe('compactSession', () => {
 });
 
 describe('session.compact hook', () => {
-  it('logs only the outcome, not one line per decision', async () => {
+  function run(fetch: (url: string, init?: { body?: string }) => Promise<{ status: number; ok: boolean; text: string }>) {
     const handlers: Record<string, Function> = {};
     register(((name: string, h: Function) => { handlers[name] = h; }) as never, { preserveRecentMessages: 1 } as never);
-    const fetch = jevFetch(() => 0.1);
-    const logs: string[] = [];
+    const logs: { text: string; to?: string }[] = [];
+    const toasts: string[] = [];
     const $ = {
       env: { get: async () => 'k' },
       settings: { read: async () => ({}) },
       http: { fetch: async (url: string, init?: { body?: string }) => fetch(url, init) },
-      ui: { log: (t: string) => logs.push(t), toast: () => {} },
+      ui: {
+        log: (text: string, options?: { to?: string }) => logs.push({ text, to: options?.to }),
+        toast: (text: string) => toasts.push(text),
+      },
     };
-    await handlers['session.compact']($, { messages: transcript() }, async () => ({}));
+    return handlers['session.compact']($, { messages: transcript() }, async () => ({})).then(() => ({ logs, toasts }));
+  }
+
+  it('shows only "compaction done" and logs the outcome to the debug log', async () => {
+    const { logs, toasts } = await run(jevFetch(() => 0.1));
+    expect(toasts).toEqual(['compaction done']);
     expect(logs).toHaveLength(1);
-    expect(logs[0]).toMatch(/^(kept|fallback)/);
+    expect(logs[0]).toEqual({ text: expect.stringMatching(/^kept/), to: 'debug' });
+  });
+
+  it('shows nothing on a fallback and logs it to the debug log', async () => {
+    const { logs, toasts } = await run(async () => ({ status: 500, ok: false, text: 'x' }));
+    expect(toasts).toEqual([]);
+    expect(logs).toHaveLength(1);
+    expect(logs[0]).toEqual({ text: expect.stringMatching(/^fallback/), to: 'debug' });
   });
 });

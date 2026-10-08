@@ -66,11 +66,12 @@ Every option except `apiKey`, `compactAtPercent`, `minReductionRatio` and
 do. The `session.compact` hook runs the Jev requests concurrently. If Jev fails,
 the response is malformed, the key is unavailable, the history cannot be
 fitted into the state budget, or the estimated reduction is below
-`minReductionRatio`, the hook logs a fallback and delegates to Claude Code's
-built-in compaction. The outcome is shown as a toast and logged with the
-reduction, per-reason counts, state size and request count; a per-call
-`decisions:` line with both probabilities is logged for diagnosis. The
-`turn.complete` hook requests
+`minReductionRatio`, the hook delegates to Claude Code's built-in compaction.
+The only thing the user sees is a `compaction done` toast when the pruned
+history replaced the built-in summary. Everything else goes to the debug log
+alone (`claude --debug`): the outcome line with the reduction, per-reason
+counts, state size and request count, every fallback and its reason, and
+`turn.complete`'s skipped auto-compacts. The `turn.complete` hook requests
 compaction when `context.percent` reaches `compactAtPercent`, with an
 in-flight guard.
 

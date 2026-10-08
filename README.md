@@ -131,7 +131,7 @@ The repository root is a Claude Code function-hook plugin: `hooks/fast-jev.ts`
 is a thin adapter that feeds `session.compact` transcripts through `src/` and
 falls back to Claude Code's built-in summary on errors or insufficient
 reduction. See [`hooks/README.md`](hooks/README.md) for configuration and the
-Claude Code 2.1.274 type reference.
+Claude Code 2.1.292 type reference.
 
 ### Install in Claude Code
 

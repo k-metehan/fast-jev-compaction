@@ -209,8 +209,18 @@ function ownBlocksStart(blocks: readonly ApiBlock[], text: string): number {
 const QUEUED_PROMPT =
   /^<system-reminder>\nThe user sent a new message while you were working:\n([\s\S]*?)\n\nThis is how Claude Code surfaces messages the user sends mid-turn — within the running turn, often alongside the next tool result, rather than as a separate conversation turn\. Address the message above as you continue this turn\.\n<\/system-reminder>$/;
 
-/** The token countdown the host adds after each step and sends again on the next one. */
-const TOKEN_COUNT = /^<system-reminder>\n<total_tokens>\d+ tokens left<\/total_tokens>\n<\/system-reminder>$/;
+/**
+ * The token countdown the host adds after each step and sends again on the
+ * next one: its s2t writes a count, or `Infinite` (5000000 when fixed). It is
+ * always wrapped plainly (Hl); the reminder-ID wrapper (cxn, under
+ * CLAUDE_CODE_WHIMSICAL_ELEPHANT) goes only around peer, coordinator and
+ * forwarded queued prompts.
+ */
+const TOKEN_COUNT =
+  /^<system-reminder>\n<total_tokens>(?:\d+|Infinite) tokens left<\/total_tokens>\n<\/system-reminder>$/;
+
+/** A reminder opening on the countdown's tag that TOKEN_COUNT does not take. */
+const TOKEN_COUNT_LIKE = /^<system-reminder\b[^>]*>\s*<total_tokens>/;
 
 /**
  * What a piece of hidden content is, for compaction. The hook can only hand
@@ -219,13 +229,16 @@ const TOKEN_COUNT = /^<system-reminder>\n<total_tokens>\d+ tokens left<\/total_t
  * the user's own words are put back (`prompt`); a token countdown is let go
  * (`drop`: the host sends a fresh one with every step, and the built-in
  * summary drops it too); anything else (skill bodies, hook output, file
- * contents, notices) keeps its calls (`keep`).
+ * contents, notices) keeps its calls (`keep`). A countdown in a form this
+ * build does not know keeps its calls too (`unrecognised`): it follows every
+ * result, so the compaction would fall back each time, and the log says why.
  */
-export function classifyHidden(text: string): { prompt: string } | 'drop' | 'keep' {
+export function classifyHidden(text: string): { prompt: string } | 'drop' | 'keep' | 'unrecognised' {
   const trimmed = text.trim();
   const prompt = QUEUED_PROMPT.exec(trimmed);
   if (prompt) return { prompt: prompt[1]! };
-  return TOKEN_COUNT.test(trimmed) ? 'drop' : 'keep';
+  if (TOKEN_COUNT.test(trimmed)) return 'drop';
+  return TOKEN_COUNT_LIKE.test(trimmed) ? 'unrecognised' : 'keep';
 }
 
 /** A folded remainder as its <system-reminder> pieces, or null when anything else is in it. */
@@ -269,11 +282,13 @@ const TEXT_ONLY_TOOLS = new Set([
  * library, keyed by the message's calls: the user's typed prompts as text to
  * put back, or no text (the calls are kept) when any piece is something else
  * or cannot be told apart. Token countdowns alone make no entry. A result the
- * API form does not show is kept too.
+ * API form does not show is kept too. `onUnrecognised` is given each piece
+ * classifyHidden calls `unrecognised`.
  */
 export function attachedContent(
   rows: readonly SessionMessage[],
   view: readonly ApiMessage[],
+  onUnrecognised?: (piece: string) => void,
 ): AttachedContent[] {
   const own = new Map<string, string>();
   const at = new Map<string, number>();
@@ -310,8 +325,13 @@ export function attachedContent(
     const prompts: string[] = [];
     const take = (piece: string): void => {
       const kind = classifyHidden(piece);
-      if (kind === 'keep') readable = false;
-      else if (kind !== 'drop') prompts.push(kind.prompt);
+      if (kind === 'drop') return;
+      if (typeof kind === 'object') {
+        prompts.push(kind.prompt);
+        return;
+      }
+      if (kind === 'unrecognised') onUnrecognised?.(piece);
+      readable = false;
     };
     for (const block of message.content) {
       if (block.type !== 'tool_result') continue;
@@ -607,7 +627,9 @@ export const register: Register = (on: On, options: PluginOptions) => {
   let headless = false;
 
   on('session.compact', async ($, event, next) => {
-    const report = (text: string): Promise<void> => logOutcome($, event, text);
+    // Hidden content in a form this build does not know, once per compaction.
+    let unrecognised = '';
+    const report = (text: string): Promise<void> => logOutcome($, event, `${text}${unrecognised}`);
     // Esc, a hook above that settled first, or the budget: Claude Code has moved
     // on, so stop, log it as such, and hand back nothing it would act on.
     const interrupted = async () => {
@@ -618,7 +640,9 @@ export const register: Register = (on: On, options: PluginOptions) => {
       const apiKey = await getApiKey($, configured);
       const view = await apiView($, event.agentId);
       // What Claude Code keeps beside the rows; a row rebuilt or left out would lose it.
-      const attached = attachedContent(event.messages, view);
+      const attached = attachedContent(event.messages, view, (piece) => {
+        unrecognised ||= `; unrecognised attachment format, its calls kept: ${JSON.stringify(piece.slice(0, 80))}`;
+      });
       const config: HookConfig = {
         ...configured,
         apiKey,

@@ -29,7 +29,9 @@ format has no meta or origin), so only the user's own words are put back: a
 message typed while a tool ran comes back as that user message, in place,
 when every row from the call to the result is dropped. A token countdown
 goes with its row (the host sends a fresh one each step, and the built-in
-summary drops it too). Anything else (a skill body, hook output, an image,
+summary drops it too); one in a form the hook does not know keeps its calls,
+and the compaction's log line names it (`unrecognised attachment format`),
+since otherwise every compaction would fall back unexplained. Anything else (a skill body, hook output, an image,
 content that cannot be told apart) keeps its calls. Without the API form the
 hook falls back to the built-in summary.
 

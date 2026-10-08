@@ -328,6 +328,35 @@ describe('hidden messages beside a rewritten tool result (Claude Code 2.1.292)',
     expect(whole.fellBack).toBe(false);
   });
 
+  it('lets an Infinite countdown go, and names a countdown it does not know in the log, once', async () => {
+    const steps = (countdown: (step: number) => Raw) => {
+      const t = transcriptBuilder();
+      const raw: Raw[] = [t.prompt('Fix the build')];
+      for (let step = 1; step <= 4; step += 1) {
+        raw.push(t.thinking(), t.use(`t${step}`, 'Bash', { command: `step ${step}` }), t.result(`t${step}`, output(step)));
+        raw.push(countdown(step));
+      }
+      raw.push(t.say('done'));
+      return raw;
+    };
+    const t = transcriptBuilder();
+    const infinite = await compactThroughHook(steps(() => t.tokens('Infinite')), answers('drop_call', ['t1', 't2']));
+    expect(infinite.logs.join('\n')).toMatch(/2 call_dropped/);
+    expect(infinite.logs.join('\n')).not.toMatch(/protected|unrecognised/);
+
+    const changed = await compactThroughHook(
+      steps((step) => t.tokens(step, `<total_tokens>${step} of 10 tokens left</total_tokens>`)),
+      answers('drop_call', ['t1', 't2']),
+    );
+    const outcome = changed.logs.filter((line) => line.startsWith('returned'));
+    expect(outcome).toHaveLength(1);
+    expect(outcome[0]).toMatch(/\d protected/);
+    expect(count(changed.logs, 'unrecognised attachment format')).toBe(1);
+    expect(outcome[0]).toMatch(
+      /; unrecognised attachment format, its calls kept: "<system-reminder>\\n<total_tokens>1 of 10 tokens left/,
+    );
+  });
+
   it('falls back to the built-in summary when the host gives no API view', async () => {
     const { raw } = session();
     const denied = await compactThroughHook(raw, answers('drop_call', ['t2']), () => ({ deny: 'no such agent' }));
@@ -360,6 +389,24 @@ describe('attachedContent', () => {
     ).toEqual([{ toolUseIds: ['x'] }]);
     expect(attachedContent([row('x', '53M\tdir')], folded('Tool loaded.'))).toEqual([{ toolUseIds: ['x'] }]);
     expect(classifyHidden(`\n${typed('two\n\nparagraphs')}\n`)).toEqual({ prompt: 'two\n\nparagraphs' });
+  });
+
+  it('knows the countdown as s2t writes it, and tells a changed one from other content', () => {
+    const countdown = (inner: string, open = '<system-reminder>', close = '</system-reminder>') =>
+      `${open}\n<total_tokens>${inner}</total_tokens>\n${close}`;
+    expect(classifyHidden(countdown('5000000 tokens left'))).toBe('drop');
+    expect(classifyHidden(countdown('Infinite tokens left'))).toBe('drop');
+    expect(classifyHidden(countdown('about 5k tokens left'))).toBe('unrecognised');
+    const id = 'a1b2c3d4e5f60718';
+    expect(classifyHidden(countdown('5 tokens left', `<system-reminder id="${id}">`, `</system-reminder id="${id}">`))).toBe(
+      'unrecognised',
+    );
+    expect(classifyHidden('<system-reminder>\nDiagnostics: 2 new errors\n</system-reminder>')).toBe('keep');
+    const seen: string[] = [];
+    expect(attachedContent([row('x', '53M\tdir')], folded(countdown('about 5k tokens left')), (piece) => seen.push(piece))).toEqual([
+      { toolUseIds: ['x'] },
+    ]);
+    expect(seen).toEqual([countdown('about 5k tokens left')]);
   });
 
   it('reads blocks after the results, but not the text of a row of its own', () => {

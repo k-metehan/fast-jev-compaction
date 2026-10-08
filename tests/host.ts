@@ -310,10 +310,11 @@ export function transcriptBuilder() {
       message: { content: texts.map((text) => ({ type: 'text', text })) },
     }),
     queued: (prompt: string): Raw => ({ type: 'attachment', uuid: uuid(), attachment: { type: 'queued_command', prompt } }),
-    tokens: (left: number): Raw => ({
+    /** The token countdown (s2t): a count, `Infinite`, or any other text as given. */
+    tokens: (left: number | 'Infinite', text = `<total_tokens>${left} tokens left</total_tokens>`): Raw => ({
       type: 'attachment',
       uuid: uuid(),
-      attachment: { type: 'total_tokens_reminder', text: `<total_tokens>${left} tokens left</total_tokens>` },
+      attachment: { type: 'total_tokens_reminder', text },
     }),
     image: (): Raw => ({ type: 'attachment', uuid: uuid(), attachment: { type: 'pasted_image' } }),
     skillBody: (text: string): Raw => ({ type: 'user', uuid: uuid(), isMeta: true, message: { content: text } }),

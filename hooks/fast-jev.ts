@@ -203,13 +203,6 @@ function ownBlocksStart(blocks: readonly ApiBlock[], text: string): number {
 }
 
 /**
- * How Claude Code 2.1.292 renders a message the user typed while a tool ran
- * (a human queued_command): the prompt is the one capture.
- */
-const QUEUED_PROMPT =
-  /^<system-reminder>\nThe user sent a new message while you were working:\n([\s\S]*?)\n\nThis is how Claude Code surfaces messages the user sends mid-turn — within the running turn, often alongside the next tool result, rather than as a separate conversation turn\. Address the message above as you continue this turn\.\n<\/system-reminder>$/;
-
-/**
  * The token countdown the host adds after each step and sends again on the
  * next one: its s2t writes a count, or `Infinite` (5000000 when fixed). It is
  * always wrapped plainly (Hl); the reminder-ID wrapper (cxn, under
@@ -223,20 +216,25 @@ const TOKEN_COUNT =
 const TOKEN_COUNT_LIKE = /^<system-reminder\b[^>]*>\s*<total_tokens>/;
 
 /**
- * What a piece of hidden content is, for compaction. The hook can only hand
- * Claude Code a user or assistant message (its row format has no meta or
- * origin), and a user message it builds counts as typed by the user. So only
- * the user's own words are put back (`prompt`); a token countdown is let go
- * (`drop`: the host sends a fresh one with every step, and the built-in
- * summary drops it too); anything else (skill bodies, hook output, file
- * contents, notices) keeps its calls (`keep`). A countdown in a form this
- * build does not know keeps its calls too (`unrecognised`): it follows every
- * result, so the compaction would fall back each time, and the log says why.
+ * What a piece of hidden content is, for compaction: a token countdown is let
+ * go (`drop`: the host sends a fresh one with every step, and the built-in
+ * summary drops it too); anything else keeps its calls (`keep`). A countdown
+ * in a form this build does not know keeps its calls too (`unrecognised`): it
+ * follows every result, so the compaction would fall back each time, and the
+ * log says why.
+ *
+ * Nothing is put back as text. The hook can only hand Claude Code a user or
+ * assistant message (its row format has no meta or origin), and a user
+ * message it builds counts as typed by the user. A prompt queued while a tool
+ * ran is no exception: Claude Code 2.1.292 (mme) wraps the user's own in the
+ * same words ("The user sent a new message while you were working:") as an
+ * automatic continuation's (a meta one, a Stop hook's next input), a plugin's
+ * asUser prompt and each of a batch of relayed prompts, and the API form
+ * keeps neither origin nor meta. So a queued prompt keeps its calls, and with
+ * them its own place and wrapper.
  */
-export function classifyHidden(text: string): { prompt: string } | 'drop' | 'keep' | 'unrecognised' {
+export function classifyHidden(text: string): 'drop' | 'keep' | 'unrecognised' {
   const trimmed = text.trim();
-  const prompt = QUEUED_PROMPT.exec(trimmed);
-  if (prompt) return { prompt: prompt[1]! };
   if (TOKEN_COUNT.test(trimmed)) return 'drop';
   return TOKEN_COUNT_LIKE.test(trimmed) ? 'unrecognised' : 'keep';
 }
@@ -274,16 +272,16 @@ const TEXT_ONLY_TOOLS = new Set([
  * For each API user message holding tool results of the rows, the content
  * that belongs to the calls' own rows (the tool_use rows and result rows, and
  * whatever lies between) is what precedes the first block of a user row that
- * follows the results: that row keeps its own blocks and group. The host's
- * normalization (AHr) moves attachments up past such a row, so the follower's
- * attachments precede its blocks as well: with a follower, what precedes is
- * read only to keep calls, never to put text back. Each piece of it is
- * classified (classifyHidden). It comes back as AttachedContent for the
- * library, keyed by the message's calls: the user's typed prompts as text to
- * put back, or no text (the calls are kept) when any piece is something else
- * or cannot be told apart. Token countdowns alone make no entry. A result the
- * API form does not show is kept too. `onUnrecognised` is given each piece
- * classifyHidden calls `unrecognised`.
+ * follows the results: that row keeps its own blocks and group. (The host's
+ * normalization, AHr, moves attachments up past such a row, so the follower's
+ * attachments precede its blocks as well and are read as the results': at
+ * worst a call is kept that could have gone.) Each piece of it is classified
+ * (classifyHidden). When any piece is anything but a token countdown, or
+ * cannot be told apart, it comes back as AttachedContent for the library,
+ * keyed by the message's calls and without text: those calls are kept.
+ * Countdowns alone make no entry. A result the API form does not show is kept
+ * too. `onUnrecognised` is given each piece classifyHidden calls
+ * `unrecognised`.
  */
 export function attachedContent(
   rows: readonly SessionMessage[],
@@ -320,25 +318,21 @@ export function attachedContent(
     const followers: SessionMessage[] = [];
     for (let index = last + 1; plainUserRow(rows[index]); index += 1) followers.push(rows[index]!);
 
-    let readable =
+    // The calls may go: nothing beside them needs keeping.
+    let free =
       !rows.slice(first, last + 1).some(plainUserRow) && followers.every((row) => row.text.length > 0);
-    const prompts: string[] = [];
     const take = (piece: string): void => {
       const kind = classifyHidden(piece);
       if (kind === 'drop') return;
-      if (typeof kind === 'object') {
-        prompts.push(kind.prompt);
-        return;
-      }
       if (kind === 'unrecognised') onUnrecognised?.(piece);
-      readable = false;
+      free = false;
     };
     for (const block of message.content) {
       if (block.type !== 'tool_result') continue;
       const id = block['tool_use_id'];
       const mine = typeof id === 'string' ? own.get(id) : undefined;
       if (mine === undefined) {
-        readable = false;
+        free = false;
         continue;
       }
       const content = block['content'];
@@ -349,40 +343,35 @@ export function attachedContent(
         Array.isArray(content) &&
         content.some((part) => !['text', 'image'].includes(String((part as { type?: unknown } | null)?.type)))
       ) {
-        readable = false;
+        free = false;
       }
       if (
         Array.isArray(content) &&
         TEXT_ONLY_TOOLS.has(toolOf.get(id as string) ?? '') &&
         content.some((part) => (part as { type?: unknown } | null)?.type === 'image')
       ) {
-        readable = false;
+        free = false;
       }
       const text = contentText(content);
       if (text.trim() === mine) continue;
       if (text.startsWith(mine)) {
         const pieces = reminderPieces(text.slice(mine.length));
-        if (pieces === null) readable = false;
+        if (pieces === null) free = false;
         else pieces.forEach(take);
-      } else readable = false;
+      } else free = false;
     }
     const others = message.content.filter((block) => block.type !== 'tool_result');
     const end = followers.length > 0 ? ownBlocksStart(others, followers[0]!.text) : others.length;
-    if (end < 0) readable = false;
+    if (end < 0) free = false;
     for (const block of others.slice(0, Math.max(0, end))) {
       if (block.type !== 'text') {
-        readable = false;
+        free = false;
         continue;
       }
       const text = String(block['text'] ?? '').trim();
       if (text) take(text);
     }
-    // The host moves every attachment up past typed rows to the results (AHr),
-    // so a follower's own attachments come before its blocks too: a prompt
-    // there may be the follower's, which comes back with it. Keep the calls.
-    if (followers.length > 0 && prompts.length > 0) readable = false;
-    if (!readable) attached.push({ toolUseIds: ids });
-    else if (prompts.length > 0) attached.push({ toolUseIds: ids, text: prompts.join('\n\n') });
+    if (!free) attached.push({ toolUseIds: ids });
   }
   for (const id of own.keys()) if (!shown.has(id)) attached.push({ toolUseIds: [id] });
   return attached;

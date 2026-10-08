@@ -25,15 +25,17 @@ conversation's API form (`$.session.messages({ as: 'api' })`, Claude Code
 2.1.292 or later), attributing it to the call and result rows that hold it
 (not to a user row that follows them), and hands it to the library as
 `attached`. A message the hook builds counts as typed by the user (its row
-format has no meta or origin), so only the user's own words are put back: a
-message typed while a tool ran comes back as that user message, in place,
-when every row from the call to the result is dropped. A token countdown
-goes with its row (the host sends a fresh one each step, and the built-in
-summary drops it too); one in a form the hook does not know keeps its calls,
-and the compaction's log line names it (`unrecognised attachment format`),
-since otherwise every compaction would fall back unexplained. Anything else (a skill body, hook output, an image,
-content that cannot be told apart) keeps its calls. Without the API form the
-hook falls back to the built-in summary.
+format has no meta or origin), so none of it is put back as text: the calls
+beside it are kept, and it stays where Claude Code holds it. That goes for a
+message the user typed while a tool ran too: Claude Code wraps an automatic
+continuation's, a plugin's or a relay's prompt in the same words, and the
+API form keeps no origin to tell them apart. A token countdown goes with its
+row (the host sends a fresh one each step, and the built-in summary drops it
+too); one in a form the hook does not know keeps its calls, and the
+compaction's log line names it (`unrecognised attachment format`), since
+otherwise every compaction would fall back unexplained. Anything else (a
+skill body, hook output, an image, content that cannot be told apart) keeps
+its calls. Without the API form the hook falls back to the built-in summary.
 
 The state is fitted into `maxStateTokens` in stages: tool inputs are
 truncated, then long texts are abridged (oldest first, pinned messages last),

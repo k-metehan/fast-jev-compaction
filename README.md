@@ -68,8 +68,10 @@ built-in compaction summary with the original messages.
    bodies, reminders), is never lost: when every message from the first call
    to the last result is rebuilt or removed, its text is put back right after
    them; otherwise, or when it has no text to put back, those calls are kept
-   (`protected`). The Claude Code hook gives text only for the user's typed
-   words, keeps the calls for anything else, and lets token countdowns go.
+   (`protected`). The Claude Code hook gives no text: a message it builds
+   would count as typed by the user, and its API form cannot tell the user's
+   typed words from an automatic prompt. It keeps the calls beside anything
+   but token countdowns, which go.
 
 Compaction throws when every request fails (malformed answers included), the
 key is missing, the history cannot be fitted, the deadline passes, or its

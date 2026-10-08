@@ -104,8 +104,6 @@ async function compactThroughHook(
 }
 
 const count = (messages: unknown[], text: string) => JSON.stringify(messages).split(text).length - 1;
-const indexOf = (messages: unknown[], text: string) =>
-  messages.findIndex((message) => JSON.stringify(message).includes(text));
 
 describe('hidden messages beside a rewritten tool result (Claude Code 2.1.292)', () => {
   it('reproduces the loss when compaction ignores them', async () => {
@@ -121,24 +119,25 @@ describe('hidden messages beside a rewritten tool result (Claude Code 2.1.292)',
     }
   });
 
-  it('under drop_call, puts the typed message back as the user\'s words and keeps the skill call', async () => {
+  it('under drop_call, keeps the calls of a typed message and of a skill, where the host keeps them', async () => {
     const { raw, hidden } = session();
-    const { out, final, toasts, logs } = await compactThroughHook(raw, answers('drop_call', ['t2', 't3']));
+    const { out, final, toasts, logs } = await compactThroughHook(raw, answers('drop_call', ['t1', 't2', 't3']));
     expect(toasts).toEqual(['compaction done']);
     expect(out.messages).toBeDefined();
-    expect(count(final, TYPED)).toBe(1);
-    expect(count(final, SKILL)).toBe(1);
-    expect(logs.join('\n')).toMatch(/1 protected, 1 attached put back/);
-    // The prompt itself, as a user message, in place: after step 1, before step 3.
-    const typedAt = indexOf(final, TYPED);
-    expect(final[typedAt]).toMatchObject({ type: 'user', fresh: true, message: { content: TYPED } });
-    expect(typedAt).toBeGreaterThan(indexOf(final, '"step 1"'));
-    expect(typedAt).toBeLessThan(indexOf(final, SKILL));
-    expect(count(final, '"step 2"')).toBe(0);
-    // Step 2's token countdown went with it; the skill body stays where the host keeps it.
-    expect(count(final, '899998 tokens left')).toBe(0);
+    expect(logs.join('\n')).toMatch(/1 call_dropped, .*2 protected/);
+    expect(logs.join('\n')).not.toMatch(/put back/);
+    // The prompt comes back as the host holds it (its wrapper, its place), not
+    // as a message the user would seem to have typed.
+    expect(final).toContain(hidden[0]);
     expect(final).toContain(hidden[1]);
+    expect(count(final, TYPED)).toBe(1);
+    expect(final.some((entry) => 'fresh' in entry && JSON.stringify(entry).includes(TYPED))).toBe(false);
+    expect(count(final, SKILL)).toBe(1);
+    expect(count(final, '"step 1"')).toBe(0);
+    expect(count(final, '"step 2"')).toBe(1);
     expect(count(final, '"skill":"deploy"')).toBe(1);
+    // Step 1's token countdown went with it.
+    expect(count(final, '899999 tokens left')).toBe(0);
   });
 
   it('keeps the calls under drop_result, since their call rows (and what the host keeps there) survive', async () => {
@@ -164,7 +163,7 @@ describe('hidden messages beside a rewritten tool result (Claude Code 2.1.292)',
     expect(count(final, '"step 2"')).toBe(1);
   });
 
-  it('keeps parallel results whole when Jev drops only some of them', async () => {
+  it('keeps parallel calls whole when a typed message sits beside their results', async () => {
     const t = transcriptBuilder();
     const typed = t.queued(TYPED);
     const raw: Raw[] = [
@@ -182,16 +181,14 @@ describe('hidden messages beside a rewritten tool result (Claude Code 2.1.292)',
       t.result('c', output(3)),
       t.say('done'),
     ];
-    const mixed = await compactThroughHook(raw, answers('drop_call', ['t1']));
-    expect(mixed.final).toContain(typed);
-    expect(count(mixed.final, '"step a"')).toBe(1);
-    expect(mixed.logs.join('\n')).toMatch(/1 protected/);
-
-    const both = await compactThroughHook(raw, answers('drop_call', ['t1', 't2']));
-    expect(both.final).not.toContain(typed);
-    expect(count(both.final, TYPED)).toBe(1);
-    // Put back once, where the last of the two results was.
-    expect(indexOf(both.final, TYPED)).toBe(indexOf(both.final, 'both done') - 1);
+    for (const dropped of [['t1'], ['t1', 't2']]) {
+      const { final, logs } = await compactThroughHook(raw, answers('drop_call', dropped));
+      expect(final, dropped.join()).toContain(typed);
+      expect(count(final, TYPED)).toBe(1);
+      expect(count(final, '"step a"')).toBe(1);
+      expect(count(final, '"step b"')).toBe(1);
+      expect(logs.join('\n')).toMatch(/2 protected/);
+    }
   });
 
   it('does not credit a following user row, or what the host keeps beside it, to the result', async () => {
@@ -324,7 +321,7 @@ describe('hidden messages beside a rewritten tool result (Claude Code 2.1.292)',
     expect(short.logs.join('\n')).toMatch(
       /fallback to built-in summary \(session longer than the API view: 4 of 6 tool results lie outside it and were kept; below 25% minimum/,
     );
-    const whole = await compactThroughHook(raw, answers('drop_call', ['t1', 't2']), undefined, options);
+    const whole = await compactThroughHook(raw, answers('drop_call', ['t1', 't4', 't5']), undefined, options);
     expect(whole.fellBack).toBe(false);
   });
 
@@ -379,16 +376,29 @@ describe('attachedContent', () => {
     { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'x', content: ['53M\tdir', ...pieces].join('\n\n') }] },
   ];
 
-  it('reads what is folded into a result after its own (trimmed) text: prompts back, countdowns go, the rest kept', () => {
+  it('reads what is folded into a result after its own (trimmed) text: countdowns go, the rest kept', () => {
     expect(attachedContent([row('x', ' 53M\tdir\n')], folded(reminder))).toEqual([]);
     expect(attachedContent([row('x', ' 53M\tdir\n')], folded(typed('homebrew is installed'), reminder))).toEqual([
-      { toolUseIds: ['x'], text: 'homebrew is installed' },
+      { toolUseIds: ['x'] },
     ]);
     expect(
-      attachedContent([row('x', '53M\tdir')], folded(typed('a'), '<system-reminder>\n# Environment update\n</system-reminder>')),
+      attachedContent([row('x', '53M\tdir')], folded('<system-reminder>\n# Environment update\n</system-reminder>')),
     ).toEqual([{ toolUseIds: ['x'] }]);
     expect(attachedContent([row('x', '53M\tdir')], folded('Tool loaded.'))).toEqual([{ toolUseIds: ['x'] }]);
-    expect(classifyHidden(`\n${typed('two\n\nparagraphs')}\n`)).toEqual({ prompt: 'two\n\nparagraphs' });
+  });
+
+  it('keeps the calls of every queued prompt: the API form cannot tell the user\'s own from an automatic one', () => {
+    // mme wraps a human's, an auto-continuation's and a plugin's asUser prompt
+    // alike, and a batch of relayed prompts as several such wrappers in one block.
+    const inner = (prompt: string) => typed(prompt).replace(/^<system-reminder>\n|\n<\/system-reminder>$/g, '');
+    const batched = `<system-reminder>\n${inner('first')}\n\n${inner('second')}\n</system-reminder>`;
+    for (const piece of [typed('homebrew is installed'), typed('continue'), batched]) {
+      expect(classifyHidden(piece)).toBe('keep');
+    }
+    const view: ApiMessage[] = [
+      { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'x', content: 'out' }, { type: 'text', text: batched }] },
+    ];
+    expect(attachedContent([row('x', 'out')], view)).toEqual([{ toolUseIds: ['x'] }]);
   });
 
   it('knows the countdown as s2t writes it, and tells a changed one from other content', () => {

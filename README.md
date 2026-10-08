@@ -164,7 +164,10 @@ auto-compaction) goes through Jev: a `compaction done` toast appears when the
 pruned history replaced the built-in summary. When Jev could not remove enough
 (short sessions, or when it fails) the built-in summary runs without a toast.
 The details of both (`kept N/M messages, no summary (…)` or
-`fallback to built-in summary (…)`) go to the debug log (`claude --debug`).
+`fallback to built-in summary (…)`) go to the debug log (`claude --debug`)
+and, one timestamped line per compaction, to the plugin's own log,
+`~/.claude/fast-jev-compaction/compactions.log` (under `CLAUDE_CONFIG_DIR` when
+set; the newest 200 lines are kept), which the desktop app writes too.
 
 To run from a checkout without installing: `CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1 claude --plugin-dir .`
 from the repository root. No publishing step is required; the marketplace is

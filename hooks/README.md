@@ -79,9 +79,14 @@ fitted into the state budget, or the estimated reduction is below
 `minReductionRatio`, the hook delegates to Claude Code's built-in compaction.
 The only thing the user sees is a `compaction done` toast when the pruned
 history replaced the built-in summary. Everything else goes to the debug log
-alone (`claude --debug`): the outcome line with the reduction, per-reason
+(`claude --debug`): the outcome line with the reduction, per-reason
 counts, state size and request count, every fallback and its reason, and
-`turn.complete`'s skipped auto-compacts. The `turn.complete` hook requests
+`turn.complete`'s skipped auto-compacts. The debug log is written only under
+`--debug`, never in the desktop app, so the outcome of each compaction (kept
+or fallback, with its reason) is also appended as one timestamped line to
+`~/.claude/fast-jev-compaction/compactions.log` (`$CLAUDE_CONFIG_DIR/...` when
+set), which keeps its newest 200 lines. Claude Code gives function hooks no
+plugin data directory, so the path is the plugin's own. The `turn.complete` hook requests
 compaction when `context.percent` reaches `compactAtPercent`, with an
 in-flight guard.
 

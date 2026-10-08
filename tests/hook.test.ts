@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
+  COMPACTION_LOG_LINES,
+  compactionLogPath,
   compactSession,
   decisionLog,
   decisionLogLines,
@@ -150,7 +152,12 @@ describe('compactSession', () => {
 });
 
 describe('session.compact hook', () => {
-  function run(fetch: (url: string, init?: { body?: string }) => Promise<{ status: number; ok: boolean; text: string }>) {
+  const LOG = '/home/me/.claude/fast-jev-compaction/compactions.log';
+
+  function run(
+    fetch: (url: string, init?: { body?: string }) => Promise<{ status: number; ok: boolean; text: string }>,
+    files: Map<string, string> = new Map(),
+  ) {
     const handlers: Record<string, Function> = {};
     register(((name: string, h: Function) => { handlers[name] = h; }) as never, { preserveRecentMessages: 1 } as never);
     const logs: { text: string; to?: string }[] = [];
@@ -164,30 +171,62 @@ describe('session.compact hook', () => {
         ...row.toolUses.map((u) => ({ type: 'tool_use', id: u.tool_use_id, name: u.tool, input: u.input })),
       ],
     }));
+    const env: Record<string, string> = { TYPESAFE_API_KEY: 'k', HOME: '/home/me' };
     const $ = {
-      env: { get: async () => 'k' },
+      env: { get: async (name: string) => env[name] },
       settings: { read: async () => ({}) },
       session: { messages: async () => view },
       http: { fetch: async (url: string, init?: { body?: string }) => fetch(url, init) },
+      fs: {
+        read: async (path: string) => {
+          const text = files.get(path);
+          if (text === undefined) throw new Error('ENOENT');
+          return text;
+        },
+        write: async (path: string, text: string) => {
+          files.set(path, text);
+        },
+      },
       ui: {
         log: (text: string, options?: { to?: string }) => logs.push({ text, to: options?.to }),
         toast: (text: string) => toasts.push(text),
       },
     };
-    return handlers['session.compact']($, { messages: transcript() }, async () => ({})).then(() => ({ logs, toasts }));
+    return handlers['session.compact']($, { trigger: 'manual', messages: transcript() }, async () => ({})).then(() => ({
+      logs,
+      toasts,
+      lines: (files.get(LOG) ?? '').split('\n').filter(Boolean),
+    }));
   }
 
-  it('shows only "compaction done" and logs the outcome to the debug log', async () => {
-    const { logs, toasts } = await run(jevFetch(() => 0.1));
+  it('shows only "compaction done" and logs the outcome to the debug log and its own log', async () => {
+    const { logs, toasts, lines } = await run(jevFetch(() => 0.1));
     expect(toasts).toEqual(['compaction done']);
     expect(logs).toHaveLength(1);
     expect(logs[0]).toEqual({ text: expect.stringMatching(/^kept/), to: 'debug' });
+    expect(lines).toEqual([expect.stringMatching(/^\d{4}-\d\d-\d\dT[\d:.]+Z manual kept \d+\/7 messages, no summary \(/)]);
   });
 
-  it('shows nothing on a fallback and logs it to the debug log', async () => {
-    const { logs, toasts } = await run(async () => ({ status: 500, ok: false, text: 'x' }));
+  it('shows nothing on a fallback and logs its reason to the debug log and its own log', async () => {
+    const { logs, toasts, lines } = await run(async () => ({ status: 500, ok: false, text: 'x' }));
     expect(toasts).toEqual([]);
     expect(logs).toHaveLength(1);
     expect(logs[0]).toEqual({ text: expect.stringMatching(/^fallback/), to: 'debug' });
+    expect(lines).toEqual([expect.stringMatching(/Z manual fallback to built-in summary \(Jev request failed \(500\): x\)$/)]);
+  });
+
+  it('keeps its own log to the newest lines, one per compaction', async () => {
+    const files = new Map([[LOG, Array.from({ length: COMPACTION_LOG_LINES }, (_, i) => `old ${i}`).join('\n')]]);
+    const { lines } = await run(jevFetch(() => 0.1), files);
+    expect(lines).toHaveLength(COMPACTION_LOG_LINES);
+    expect(lines[0]).toBe('old 1');
+    expect(lines.at(-1)).toMatch(/ manual kept /);
+  });
+
+  it('puts its log under CLAUDE_CONFIG_DIR when set', async () => {
+    const at = async (env: Record<string, string>) => compactionLogPath({ env: { get: async (name: string) => env[name] } });
+    expect(await at({ HOME: '/home/me' })).toBe(LOG);
+    expect(await at({ HOME: '/home/me', CLAUDE_CONFIG_DIR: '/cfg/' })).toBe('/cfg/fast-jev-compaction/compactions.log');
+    expect(await at({})).toBeUndefined();
   });
 });

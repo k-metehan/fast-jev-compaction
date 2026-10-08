@@ -353,10 +353,56 @@ async function getApiKey(
   return undefined;
 }
 
-// Details go to the debug log only; the user sees nothing but a short
-// "compaction done" toast when Jev's compaction replaced the history.
-function debugLog($: { ui: { log: (text: string, options?: { to?: 'debug' }) => void } }, text: string): void {
+// Details go to the debug log; the user sees nothing but a short "compaction
+// done" toast when Jev's compaction replaced the history. The debug log is
+// written only under --debug (never in the desktop app), so each compaction's
+// outcome also goes, as one line, to the plugin's own log file.
+type DebugLog = { ui: { log: (text: string, options?: { to?: 'debug' }) => void } };
+
+function debugLog($: DebugLog, text: string): void {
   $.ui.log(text, { to: 'debug' });
+}
+
+/** Lines the compaction log keeps; older ones are dropped. */
+export const COMPACTION_LOG_LINES = 200;
+
+type LogHost = DebugLog & {
+  env: { get: (name: string) => Promise<string | undefined> };
+  fs: {
+    read: (path: string) => Promise<string>;
+    write: (path: string, text: string) => Promise<void>;
+  };
+};
+
+/**
+ * The plugin's own log: `<config dir>/fast-jev-compaction/compactions.log`,
+ * the config dir being `CLAUDE_CONFIG_DIR` or `~/.claude`. Claude Code gives
+ * function hooks no plugin data directory (`$.plugin` is its name and root).
+ */
+export async function compactionLogPath($: Pick<LogHost, 'env'>): Promise<string | undefined> {
+  const configDir = await $.env.get('CLAUDE_CONFIG_DIR');
+  const home = await $.env.get('HOME');
+  const base = configDir || (home ? `${home}/.claude` : undefined);
+  return base ? `${base.replace(/\/+$/, '')}/fast-jev-compaction/compactions.log` : undefined;
+}
+
+/** Appends one timestamped line, keeping the newest COMPACTION_LOG_LINES; never throws. */
+export async function appendCompactionLog($: LogHost, line: string, now: Date = new Date()): Promise<void> {
+  try {
+    const path = await compactionLogPath($);
+    if (!path) return;
+    let previous = '';
+    try {
+      previous = await $.fs.read(path);
+    } catch {
+      // No log yet.
+    }
+    const lines = previous.split('\n').filter((l) => l.length > 0);
+    lines.push(`${now.toISOString()} ${line.replace(/\s*\n\s*/g, ' ')}`);
+    await $.fs.write(path, `${lines.slice(-COMPACTION_LOG_LINES).join('\n')}\n`);
+  } catch (error) {
+    debugLog($, `compaction log not written (${error instanceof Error ? error.message : String(error)})`);
+  }
 }
 
 export const register: Register = (on: On, options: PluginOptions) => {
@@ -367,6 +413,11 @@ export const register: Register = (on: On, options: PluginOptions) => {
   let headless = false;
 
   on('session.compact', async ($, event, next) => {
+    const which = `${event.trigger}${event.agentId === undefined ? '' : ` (agent ${event.agentId})`}`;
+    const report = async (text: string): Promise<void> => {
+      debugLog($, text);
+      await appendCompactionLog($, `${which} ${text}`);
+    };
     try {
       const apiKey = await getApiKey($, configured);
       // What Claude Code keeps beside the rows; a row rebuilt or left out would lose it.
@@ -377,17 +428,16 @@ export const register: Register = (on: On, options: PluginOptions) => {
         return { status: response.status, ok: response.ok, text: response.text };
       });
       if (reductionRatio(result) < config.minReductionRatio) {
-        debugLog(
-          $,
+        await report(
           `fallback to built-in summary (below ${percent(config.minReductionRatio)} minimum: ${summarize(result)})`,
         );
         return next(event);
       }
-      debugLog($, `kept ${messages.length}/${event.messages.length} messages, no summary (${summarize(result)})`);
+      await report(`kept ${messages.length}/${event.messages.length} messages, no summary (${summarize(result)})`);
       $.ui.toast('compaction done');
       return { messages };
     } catch (error) {
-      debugLog($, `fallback to built-in summary (${error instanceof Error ? error.message : String(error)})`);
+      await report(`fallback to built-in summary (${error instanceof Error ? error.message : String(error)})`);
       return next(event);
     }
   });

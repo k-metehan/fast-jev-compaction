@@ -112,31 +112,35 @@ describe('hidden messages beside a rewritten tool result (Claude Code 2.1.292)',
     }
   });
 
-  for (const mode of ['drop_result', 'drop_call'] as const) {
-    it(`keeps the typed message and the skill body under ${mode}`, async () => {
-      const { raw } = session();
-      const { out, final, toasts, logs } = await compactThroughHook(raw, answers(mode, ['t2', 't3']));
-      expect(toasts).toEqual(['compaction done']);
-      expect(out.messages).toBeDefined();
-      expect(count(final, TYPED)).toBe(1);
-      expect(count(final, SKILL)).toBe(1);
-      expect(logs.join('\n')).toMatch(/attached put back/);
+  it('keeps the typed message and the skill body under drop_call, put back in place', async () => {
+    const { raw } = session();
+    const { out, final, toasts, logs } = await compactThroughHook(raw, answers('drop_call', ['t2', 't3']));
+    expect(toasts).toEqual(['compaction done']);
+    expect(out.messages).toBeDefined();
+    expect(count(final, TYPED)).toBe(1);
+    expect(count(final, SKILL)).toBe(1);
+    expect(logs.join('\n')).toMatch(/attached put back/);
+    // In place: after step 1's call, before step 3's thinking; after it, before step 4's call.
+    const typedAt = indexOf(final, TYPED);
+    const skillAt = indexOf(final, SKILL);
+    expect(typedAt).toBeGreaterThan(indexOf(final, '"step 1"'));
+    expect(typedAt).toBeLessThan(skillAt);
+    expect(skillAt).toBeLessThan(indexOf(final, '"step 4"'));
+    expect(count(final, '"step 2"')).toBe(0);
+    expect(count(final, 'Launching skill')).toBe(0);
+  });
 
-      // In place: after step 2's call, before step 3's; after step 3's, before step 4's.
-      const typedAt = indexOf(final, TYPED);
-      const skillAt = indexOf(final, SKILL);
-      expect(typedAt).toBeGreaterThan(indexOf(final, '"step 1"'));
-      expect(typedAt).toBeLessThan(skillAt);
-      expect(skillAt).toBeLessThan(indexOf(final, '"step 4"'));
-      if (mode === 'drop_result') {
-        expect(count(final, 'fast-jev-compaction truncated')).toBe(2);
-        expect(typedAt).toBeGreaterThan(indexOf(final, '"step 2"'));
-      } else {
-        expect(count(final, '"step 2"')).toBe(0);
-        expect(count(final, 'Launching skill')).toBe(0);
-      }
-    });
-  }
+  it('keeps the calls under drop_result, since their call rows (and what the host keeps there) survive', async () => {
+    const { raw, hidden } = session();
+    const { out, final, logs } = await compactThroughHook(raw, answers('drop_result', ['t2', 't3']));
+    expect(out.messages).toBeDefined();
+    expect(final).toContain(hidden[0]);
+    expect(final).toContain(hidden[1]);
+    expect(count(final, TYPED)).toBe(1);
+    expect(count(final, SKILL)).toBe(1);
+    expect(count(final, 'fast-jev-compaction truncated')).toBe(0);
+    expect(logs.join('\n')).toMatch(/2 protected/);
+  });
 
   it('keeps a call whose hidden content cannot be put back as text', async () => {
     const { raw, hidden } = session({ imageAfterStep2: true });
@@ -167,17 +171,65 @@ describe('hidden messages beside a rewritten tool result (Claude Code 2.1.292)',
       t.result('c', output(3)),
       t.say('done'),
     ];
-    const mixed = await compactThroughHook(raw, answers('drop_result', ['t1']));
+    const mixed = await compactThroughHook(raw, answers('drop_call', ['t1']));
     expect(mixed.final).toContain(typed);
-    expect(count(mixed.final, 'fast-jev-compaction truncated')).toBe(0);
+    expect(count(mixed.final, '"step a"')).toBe(1);
     expect(mixed.logs.join('\n')).toMatch(/1 protected/);
 
-    const both = await compactThroughHook(raw, answers('drop_result', ['t1', 't2']));
+    const both = await compactThroughHook(raw, answers('drop_call', ['t1', 't2']));
     expect(both.final).not.toContain(typed);
     expect(count(both.final, TYPED)).toBe(1);
-    expect(count(both.final, 'fast-jev-compaction truncated')).toBe(2);
-    // Put back once, after the last of the two results.
-    expect(indexOf(both.final, TYPED)).toBe(indexOf(both.final, '"tool_use_id":"b"'));
+    // Put back once, where the last of the two results was.
+    expect(indexOf(both.final, TYPED)).toBe(indexOf(both.final, 'both done') - 1);
+  });
+
+  it('does not credit a following user row, or what the host keeps beside it, to the result', async () => {
+    // A denied call: an error result, then the user's denial and feedback (one row,
+    // two text blocks), then a reminder grouped under that row.
+    const t = transcriptBuilder();
+    const feedback = t.userBlocks('[Request interrupted by user for tool use]', 'use the staging bucket instead');
+    const reminder = t.tokens(500);
+    const raw: Raw[] = [
+      t.prompt('Upload the build'),
+      t.thinking(),
+      t.use('up', 'mcp__s3__put', { bucket: 'prod' }),
+      t.result('up', `The user doesn't want to proceed with this tool use. ${output(1)}`, true),
+      feedback,
+      reminder,
+      t.thinking(),
+      t.use('c', 'Bash', { command: 'step c' }),
+      t.result('c', output(3)),
+      t.say('done'),
+    ];
+    const { final, out } = await compactThroughHook(raw, answers('drop_call', ['t1']));
+    expect(out.messages).toBeDefined();
+    expect(count(final, 'use the staging bucket instead')).toBe(1);
+    expect(count(final, '500 tokens left')).toBe(1);
+    expect(final).toContain(feedback);
+    expect(final).toContain(reminder);
+    expect(count(final, '"bucket":"prod"')).toBe(0);
+  });
+
+  it('keeps content the host groups under a surviving call row', async () => {
+    // A skill body between the call and its result belongs to the call row's group.
+    const t = transcriptBuilder();
+    const body = t.skillBody(SKILL);
+    const raw: Raw[] = [
+      t.prompt('Deploy'),
+      t.thinking(),
+      t.use('s', 'Skill', { skill: 'deploy' }),
+      body,
+      t.result('s', `Launching skill: deploy\n${output(1)}`),
+      t.thinking(),
+      t.use('c', 'Bash', { command: 'step c' }),
+      t.result('c', output(3)),
+      t.say('done'),
+    ];
+    const truncated = await compactThroughHook(raw, answers('drop_result', ['t1']));
+    expect(truncated.final).toContain(body);
+    expect(count(truncated.final, SKILL)).toBe(1);
+    const dropped = await compactThroughHook(raw, answers('drop_call', ['t1']));
+    expect(count(dropped.final, SKILL)).toBe(1);
   });
 
   it('falls back to the built-in summary when the host gives no API view', async () => {

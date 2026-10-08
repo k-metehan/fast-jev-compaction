@@ -178,8 +178,14 @@ export function apiViewOf(entries: readonly Raw[]): ApiMessage[] {
   const add = (role: ApiMessage['role'], blocks: ApiBlock[]): void => {
     if (blocks.length === 0) return;
     const last = view[view.length - 1];
-    if (last && last.role === role) last.content.push(...blocks);
-    else view.push({ role, content: [...blocks] });
+    if (last && last.role === role) {
+      // ZHr: merging text after text adds a newline to the earlier block.
+      const tail = last.content[last.content.length - 1];
+      if (role === 'user' && tail?.type === 'text' && blocks[0]?.type === 'text') {
+        last.content[last.content.length - 1] = { ...tail, text: `${String(tail.text)}\n` };
+      }
+      last.content.push(...blocks.map((block) => ({ ...block })));
+    } else view.push({ role, content: blocks.map((block) => ({ ...block })) });
   };
   for (const entry of entries) {
     if (entry.type === 'assistant') {
@@ -198,12 +204,13 @@ export function apiViewOf(entries: readonly Raw[]): ApiMessage[] {
     const rest = message.content.filter((b) => b.type !== 'tool_result');
     const foldable =
       rest.length > 0 && rest.every((b) => b.type === 'text' && String(b.text).startsWith('<system-reminder>'));
+    // iXe: the result's text trimmed, then each reminder trimmed, after blank lines.
     if (foldable) {
       const last = results[results.length - 1]!;
       const own = typeof last.content === 'string' ? last.content : textOf(last.content);
       results[results.length - 1] = {
         ...last,
-        content: [own.trim(), ...rest.map((b) => String(b.text))].join('\n\n'),
+        content: [own.trim(), ...rest.map((b) => String(b.text).trim())].filter(Boolean).join('\n\n'),
       };
       message.content = results;
     } else {
@@ -244,11 +251,17 @@ export function transcriptBuilder() {
       uuid: uuid(),
       message: { content: [{ type: 'tool_use', id, name: tool, input }] },
     }),
-    result: (id: string, text: string): Raw => ({
+    result: (id: string, text: string, isError = false): Raw => ({
       type: 'user',
       uuid: uuid(),
-      toolUseResult: { stdout: text },
-      message: { content: [{ type: 'tool_result', tool_use_id: id, content: text }] },
+      toolUseResult: isError ? text : { stdout: text },
+      message: { content: [{ type: 'tool_result', tool_use_id: id, content: text, ...(isError && { is_error: true }) }] },
+    }),
+    /** A user message of several text blocks (a denial with the user's feedback). */
+    userBlocks: (...texts: string[]): Raw => ({
+      type: 'user',
+      uuid: uuid(),
+      message: { content: texts.map((text) => ({ type: 'text', text })) },
     }),
     queued: (prompt: string): Raw => ({ type: 'attachment', uuid: uuid(), attachment: { type: 'queued_command', prompt } }),
     tokens: (left: number): Raw => ({

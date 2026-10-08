@@ -172,48 +172,69 @@ export type ApiBlock = { type: string; [field: string]: unknown };
 /** One message of the Messages API form, as the next request is built from it. */
 export type ApiMessage = { role: 'user' | 'assistant'; content: ApiBlock[] };
 
+/** A tool_result's or text block's text: text blocks joined with newlines (the host's Doo). */
+function contentText(content: unknown): string {
+  if (typeof content === 'string') return content;
+  if (!Array.isArray(content)) return '';
+  return content
+    .filter((block): block is { type: 'text'; text: unknown } => block?.type === 'text')
+    .map((block) => String(block.text ?? ''))
+    .join('\n');
+}
+
+/**
+ * Where a user row's own text starts among an API message's non-result
+ * blocks, or -1. The row's text is its text blocks joined with '' (the host's
+ * $ne); the API form keeps them as blocks, the last one perhaps with a newline
+ * the merge added (ZHr).
+ */
+function ownBlocksStart(blocks: readonly ApiBlock[], text: string): number {
+  for (let start = 0; start < blocks.length; start += 1) {
+    let joined = '';
+    for (let n = start; n < blocks.length; n += 1) {
+      const block = blocks[n]!;
+      if (block.type !== 'text') break;
+      joined += String(block['text'] ?? '');
+      if (joined === text || joined === `${text}\n`) return start;
+      if (!text.startsWith(joined)) break;
+    }
+  }
+  return -1;
+}
+
 /**
  * Claude Code hands `session.compact` one row per user or assistant message
- * and keeps every other message of the transcript (attachments such as the
- * reminders and the messages the user typed while a tool ran, and meta user
- * messages such as skill bodies) beside the row before it. A row handed back
- * unchanged with its handle brings them back; a row rebuilt or left out loses
- * them, and the rows do not show them. The API form does: they are rendered
- * there into the user message that holds the tool results before them, folded
- * into a tool_result's text after the result itself, or as blocks of their own
- * after the results.
+ * and keeps every other message of the transcript (reminders, messages the
+ * user typed while a tool ran, skill bodies, hook output) in the group of the
+ * row before it. A row handed back unchanged with its handle brings its group
+ * back; a row rebuilt or left out loses it, and the rows do not show it. The
+ * API form does: the host merges the user-side messages between two
+ * assistant messages into one, tool results first, then the other blocks in
+ * transcript order, some folded into the last result's text after a blank
+ * line.
  *
- * Reads that content for each API user message holding tool results of the
- * rows, as AttachedContent: its text when it is text, no text when it is not
- * (an image) or cannot be told apart from the results (the calls are then
- * kept). A result the API form does not show is kept too.
+ * For each API user message holding tool results of the rows, the content
+ * that belongs to the calls' own rows (the tool_use rows and result rows, and
+ * whatever lies between) is what precedes the first block of a user row that
+ * follows the results: that row keeps its own blocks and group. That content
+ * comes back as AttachedContent for the library, keyed by the message's calls:
+ * its text, or no text when it cannot be told apart (the calls are then kept).
+ * A result the API form does not show is kept too.
  */
 export function attachedContent(
   rows: readonly SessionMessage[],
   view: readonly ApiMessage[],
 ): AttachedContent[] {
   const own = new Map<string, string>();
-  const texts = new Map<string, number>();
-  for (const row of rows) {
-    for (const result of row.toolResults ?? []) own.set(result.tool_use_id, result.text.trim());
-    const text = row.role === 'user' ? row.text.trim() : '';
-    if (text) texts.set(text, (texts.get(text) ?? 0) + 1);
-  }
-  const ownText = (text: string): boolean => {
-    const left = texts.get(text) ?? 0;
-    if (left === 0) return false;
-    texts.set(text, left - 1);
-    return true;
-  };
-  const textOf = (content: unknown): string =>
-    typeof content === 'string'
-      ? content
-      : Array.isArray(content)
-        ? content
-            .filter((block): block is { type: 'text'; text: unknown } => block?.type === 'text')
-            .map((block) => String(block.text ?? ''))
-            .join('\n')
-        : '';
+  const at = new Map<string, number>();
+  rows.forEach((row, index) => {
+    for (const result of row.toolResults ?? []) {
+      own.set(result.tool_use_id, result.text.trim());
+      at.set(result.tool_use_id, index);
+    }
+  });
+  const plainUserRow = (row: SessionMessage | undefined): boolean =>
+    row !== undefined && row.role === 'user' && (row.toolResults ?? []).length === 0;
 
   const attached: AttachedContent[] = [];
   const shown = new Set<string>();
@@ -226,28 +247,40 @@ export function attachedContent(
     );
     if (ids.length === 0) continue;
     for (const id of ids) shown.add(id);
+    const indices = ids.map((id) => at.get(id)!);
+    const first = Math.min(...indices);
+    const last = Math.max(...indices);
+    const followers: SessionMessage[] = [];
+    for (let index = last + 1; plainUserRow(rows[index]); index += 1) followers.push(rows[index]!);
+
+    let readable =
+      !rows.slice(first, last + 1).some(plainUserRow) && followers.every((row) => row.text.length > 0);
     const extra: string[] = [];
-    let readable = true;
     for (const block of message.content) {
-      if (block.type === 'tool_result') {
-        const id = block['tool_use_id'];
-        const mine = typeof id === 'string' ? own.get(id) : undefined;
-        if (mine === undefined) {
-          readable = false;
-          continue;
-        }
-        const text = textOf(block['content']);
-        if (text.trim() === mine) continue;
-        if (text.startsWith(mine)) {
-          const rest = text.slice(mine.length).trim();
-          if (rest) extra.push(rest);
-        } else readable = false;
-      } else if (block.type === 'text') {
-        const text = String(block['text'] ?? '').trim();
-        if (text && !ownText(text)) extra.push(text);
-      } else {
+      if (block.type !== 'tool_result') continue;
+      const id = block['tool_use_id'];
+      const mine = typeof id === 'string' ? own.get(id) : undefined;
+      if (mine === undefined) {
         readable = false;
+        continue;
       }
+      const text = contentText(block['content']);
+      if (text.trim() === mine) continue;
+      if (text.startsWith(mine)) {
+        const rest = text.slice(mine.length).trim();
+        if (rest) extra.push(rest);
+      } else readable = false;
+    }
+    const others = message.content.filter((block) => block.type !== 'tool_result');
+    const end = followers.length > 0 ? ownBlocksStart(others, followers[0]!.text) : others.length;
+    if (end < 0) readable = false;
+    for (const block of others.slice(0, Math.max(0, end))) {
+      if (block.type !== 'text') {
+        readable = false;
+        continue;
+      }
+      const text = String(block['text'] ?? '').trim();
+      if (text) extra.push(text);
     }
     if (!readable) attached.push({ toolUseIds: ids });
     else if (extra.length > 0) attached.push({ toolUseIds: ids, text: extra.join('\n\n') });

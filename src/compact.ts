@@ -277,10 +277,12 @@ export type Rebuilt = {
  * content (see AttachedContent). Untouched messages are returned as the same
  * objects they came in as; messages that lose all their content are removed.
  *
- * When every message holding an attached content's results is rebuilt or
- * removed, its text is put back after them: appended to the last one, or as a
- * user message of its own in its place. When only some are (the content's
- * owner is unknown), or the content has no text, those calls are kept instead.
+ * The host may keep an attached content beside any message from the first
+ * holding one of its calls or results to the last (its window). When every
+ * message of the window is rebuilt or removed, its text is put back after
+ * them: appended to the last one, or as a user message of its own in its
+ * place. When only some are (the content's owner is unknown), or the content
+ * has no text, those calls are kept instead.
  */
 export function rebuild(
   messages: readonly Message[],
@@ -290,29 +292,43 @@ export function rebuild(
   attached: readonly AttachedContent[] = [],
 ): Rebuilt {
   const actions = actionsOf(decisions, calls);
-  const holders = attached.map((content) => {
+  // Every message from the first holding one of the content's calls or results
+  // to the last: the host may keep the content beside any of them.
+  const windows = attached.map((content) => {
     const ids = new Set(content.toolUseIds);
     const indices: number[] = [];
     messages.forEach((message, index) => {
-      if ((message.toolResults ?? []).some((result) => ids.has(result.tool_use_id))) indices.push(index);
+      if (
+        message.toolUses.some((tool) => ids.has(tool.tool_use_id)) ||
+        (message.toolResults ?? []).some((result) => ids.has(result.tool_use_id))
+      ) {
+        indices.push(index);
+      }
     });
-    return indices;
+    if (indices.length === 0) return [];
+    const first = indices[0]!;
+    return Array.from({ length: indices[indices.length - 1]! - first + 1 }, (_, n) => first + n);
   });
 
   let out = messages.map((message) => rewriteMessage(message, actions, headChars));
   const lost = (index: number): boolean => out[index] !== messages[index];
   const reverted = new Set<string>();
-  for (let pass = 0; pass < attached.length + 1; pass += 1) {
+  for (let pass = 0; pass < messages.length + 1; pass += 1) {
     let changed = false;
     attached.forEach((content, n) => {
-      const indices = holders[n] ?? [];
-      const gone = indices.filter(lost);
+      const window = windows[n] ?? [];
+      const gone = window.filter(lost);
       if (gone.length === 0) return;
-      if (content.text !== undefined && gone.length === indices.length) return;
+      if (content.text !== undefined && gone.length === window.length) return;
+      // Some kept, some not (or nothing to put back): keep the lost ones too.
       for (const index of gone) {
-        for (const result of messages[index]?.toolResults ?? []) {
-          if (actions.delete(result.tool_use_id)) {
-            reverted.add(result.tool_use_id);
+        const message = messages[index];
+        for (const id of [
+          ...(message?.toolUses ?? []).map((tool) => tool.tool_use_id),
+          ...(message?.toolResults ?? []).map((result) => result.tool_use_id),
+        ]) {
+          if (actions.delete(id)) {
+            reverted.add(id);
             changed = true;
           }
         }
@@ -325,10 +341,10 @@ export function rebuild(
   const putBack = new Map<number, string[]>();
   const carried: AttachedContent[] = [];
   attached.forEach((content, n) => {
-    const indices = holders[n] ?? [];
+    const window = windows[n] ?? [];
     const text = content.text?.trim();
-    if (!text || indices.length === 0 || !indices.every(lost)) return;
-    const last = indices[indices.length - 1]!;
+    if (!text || window.length === 0 || !window.every(lost)) return;
+    const last = window[window.length - 1]!;
     putBack.set(last, [...(putBack.get(last) ?? []), text]);
     carried.push(content);
   });

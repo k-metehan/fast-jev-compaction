@@ -361,10 +361,25 @@ describe('decisions', () => {
     expect(removed.messages[at - 1]?.text).toBe('a.ts looks fine; checking b.ts');
     expect(removed.messages[at]).toMatchObject({ role: 'user', toolUses: [] });
 
-    // Rebuilt: appended to the rebuilt result message.
+    // Rebuilt result, call kept: the content may sit beside the call, so the call is kept whole.
     const truncated = rebuild(messages, drop('drop_result'), calls, 300, [{ toolUseIds: ['tool-2'], text: note }]);
-    expect(truncated.messages[5]?.text).toBe(note);
-    expect(truncated.messages[5]?.toolResults?.[0]?.text).toMatch(/fast-jev-compaction truncated/);
+    expect(truncated.carried).toHaveLength(0);
+    expect(truncated.messages[5]).toBe(messages[5]);
+    expect(truncated.decisions[1]).toMatchObject({ action: 'keep', reason: 'protected' });
+    expect(truncated.messages[2]?.toolResults?.[0]?.text).toMatch(/fast-jev-compaction truncated/);
+
+    // Both rebuilt (a message holding the call and the result): appended to it.
+    const one = [messages[0]!, { ...messages[4]!, toolResults: messages[5]!.toolResults }, messages[9]!];
+    const oneCalls = collectToolCalls(one, 0);
+    const appended = rebuild(
+      one,
+      [decideCall(oneCalls[0]!, { keepCall: 0.9, keepResult: 0.1 }, options)],
+      oneCalls,
+      300,
+      [{ toolUseIds: ['tool-2'], text: note }],
+    );
+    expect(appended.messages[1]?.text).toBe(note);
+    expect(appended.messages[1]?.toolResults?.[0]?.text).toMatch(/fast-jev-compaction truncated/);
 
     // Shared by a kept result and a dropped one: the dropped one is kept too.
     const mixed = rebuild(

@@ -62,14 +62,16 @@ export interface ToolCall {
  */
 export interface AttachedContent {
   /**
-   * The results it sits beside. The host cannot say which one it belongs to,
-   * so it is lost only when every message holding them is rebuilt or removed.
+   * The calls it sits beside. The host may keep it beside any message from the
+   * first holding one of their calls or results to the last, so it is lost
+   * only when every one of those messages is rebuilt or removed.
    */
   toolUseIds: string[];
   /**
-   * The content as text, put back after those results when they are all
-   * rebuilt or removed. Absent when it cannot be put back as text (an image,
-   * or content the host could not attribute): those calls are then kept.
+   * The content as text, put back after those messages when they are all
+   * rebuilt or removed. Absent when it must not be put back as text (an image,
+   * or content that is not the user's own words, or that could not be
+   * attributed): those calls are then kept.
    */
   text?: string;
 }

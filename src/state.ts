@@ -37,6 +37,9 @@ export function estimateTokens(text: string): number {
   return Math.ceil(tokens);
 }
 
+/** How much of `/compact <instructions>` goes into the goal, as recent prompts are capped at 500. */
+export const MAX_INSTRUCTION_CHARS = 2_000;
+
 export function truncate(text: string, limit: number): string {
   return text.length <= limit ? text : `${text.slice(0, Math.max(0, limit - 1))}…`;
 }
@@ -217,7 +220,7 @@ export function fitState(
   options: Pick<ResolvedCompactOptions, 'maxStateTokens' | 'preserveRecentMessages' | 'goal'> &
     Partial<Pick<ResolvedCompactOptions, 'instructions'>>,
 ): FittedState {
-  const instructions = options.instructions?.trim();
+  const instructions = truncate(options.instructions?.trim() ?? '', MAX_INSTRUCTION_CHARS);
   const goal = [
     options.goal || goalFromMessages(messages),
     instructions ? `The user asked this compaction to keep: ${instructions}` : '',

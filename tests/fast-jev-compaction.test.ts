@@ -13,6 +13,7 @@ import {
   IMAGE_CHARS,
   isRetryable,
   JevDeadlineError,
+  MAX_INSTRUCTION_CHARS,
   stopsAll,
   JevRequestError,
   JevTransportError,
@@ -180,6 +181,11 @@ describe('state fitting', () => {
     const { state } = fitState(transcript(), [], { ...fit, instructions: ' the b.test.ts failure ' });
     expect(state.goal).toBe('fix the test\nThe user asked this compaction to keep: the b.test.ts failure');
     expect(fitState(transcript(), [], { ...fit, instructions: '  ' }).state.goal).toBe('fix the test');
+    // A pasted plan is capped, as recent prompts are, so it cannot crowd out the history.
+    const long = fitState(transcript(), [], { ...fit, instructions: 'keep the auth parts '.repeat(500) }).state.goal;
+    const kept = long.slice(long.indexOf(': ') + 2);
+    expect(kept).toHaveLength(MAX_INSTRUCTION_CHARS);
+    expect(kept.endsWith('…')).toBe(true);
   });
 
   it('truncates tool inputs before touching message text', () => {

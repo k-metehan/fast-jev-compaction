@@ -128,7 +128,7 @@ export interface FittedState {
 export interface CompactOptions {
   /** Ongoing task description; defaults to the last few user prompts. */
   goal?: string;
-  /** What the user asked this compaction to keep (`/compact <instructions>`); added to the goal. */
+  /** What the user asked this compaction to keep (`/compact <instructions>`); its first 2000 chars go into the goal. */
   instructions?: string;
   /** Minimum keep probability for a call or result to stay. Default 0.5. */
   keepThreshold?: number;

@@ -7,7 +7,7 @@ import {
   resolveHookConfig,
   type ApiMessage,
 } from '../hooks/fast-jev.ts';
-import { apiViewOf, host, transcriptBuilder, type Raw, type Row } from './host.ts';
+import { apiViewOf, bubbleAttachments, host, transcriptBuilder, type Raw, type Row } from './host.ts';
 
 const TYPED = 'ALSO DO NOT TOUCH config.json';
 const SKILL = '# Deploy skill: deploy with care, run the smoke test first.';
@@ -219,6 +219,55 @@ describe('hidden messages beside a rewritten tool result (Claude Code 2.1.292)',
     expect(final).toContain(feedback);
     expect(final).toContain(reminder);
     expect(count(final, '"bucket":"prod"')).toBe(0);
+  });
+
+  it('moves attachments up past plain user messages, as the host does before the API form (AHr)', () => {
+    const t = transcriptBuilder();
+    const use = t.use('a', 'Bash', { command: 'A' });
+    const result = t.result('a', 'out');
+    const typed = t.prompt('typed after the result');
+    const body = t.skillBody(SKILL);
+    const queued = t.queued(TYPED);
+    const tokens = t.tokens(7);
+    const virtual: Raw = { ...t.prompt('virtual'), isVirtual: true };
+    expect(bubbleAttachments([use, result, typed, body, virtual, queued, tokens])).toEqual([
+      use,
+      result,
+      queued,
+      tokens,
+      typed,
+      body,
+    ]);
+    // An attachment after an assistant message stays there.
+    expect(bubbleAttachments([typed, use, queued, result])).toEqual([typed, use, queued, result]);
+  });
+
+  it('does not put back a prompt the host moved up from a typed row after the results', async () => {
+    // A result, then a row the user typed, then a prompt queued in that row's
+    // group: the API form shows the prompt before the typed row's text, beside
+    // the result, though the typed row (kept) brings it back with its group.
+    const t = transcriptBuilder();
+    const typed = t.prompt('and then check the logs');
+    const queued = t.queued(TYPED);
+    const raw: Raw[] = [
+      t.prompt('Build it'),
+      t.thinking(),
+      t.use('b', 'Bash', { command: 'make' }),
+      t.result('b', output(1), true),
+      typed,
+      queued,
+      t.tokens(4),
+      t.thinking(),
+      t.use('c', 'Bash', { command: 'step c' }),
+      t.result('c', output(3)),
+      t.say('done'),
+    ];
+    const { final, out } = await compactThroughHook(raw, answers('drop_call', ['t1']));
+    expect(out.messages).toBeDefined();
+    expect(final).toContain(typed);
+    expect(final).toContain(queued);
+    expect(count(final, TYPED)).toBe(1);
+    expect(count(final, '"command":"make"')).toBe(1);
   });
 
   it('keeps content the host groups under a surviving call row', async () => {

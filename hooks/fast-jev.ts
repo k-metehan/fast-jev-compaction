@@ -255,14 +255,17 @@ const TEXT_ONLY_TOOLS = new Set([
  * back; a row rebuilt or left out loses it, and the rows do not show it. The
  * API form does: the host merges the user-side messages between two
  * assistant messages into one, tool results first, then the other blocks in
- * transcript order, some folded into the last result's text after a blank
- * line.
+ * transcript order (attachments moved up ahead of plain user messages), some
+ * folded into the last result's text after a blank line.
  *
  * For each API user message holding tool results of the rows, the content
  * that belongs to the calls' own rows (the tool_use rows and result rows, and
  * whatever lies between) is what precedes the first block of a user row that
- * follows the results: that row keeps its own blocks and group. Each piece of
- * it is classified (classifyHidden). It comes back as AttachedContent for the
+ * follows the results: that row keeps its own blocks and group. The host's
+ * normalization (AHr) moves attachments up past such a row, so the follower's
+ * attachments precede its blocks as well: with a follower, what precedes is
+ * read only to keep calls, never to put text back. Each piece of it is
+ * classified (classifyHidden). It comes back as AttachedContent for the
  * library, keyed by the message's calls: the user's typed prompts as text to
  * put back, or no text (the calls are kept) when any piece is something else
  * or cannot be told apart. Token countdowns alone make no entry. A result the
@@ -354,6 +357,10 @@ export function attachedContent(
       const text = String(block['text'] ?? '').trim();
       if (text) take(text);
     }
+    // The host moves every attachment up past typed rows to the results (AHr),
+    // so a follower's own attachments come before its blocks too: a prompt
+    // there may be the follower's, which comes back with it. Keep the calls.
+    if (followers.length > 0 && prompts.length > 0) readable = false;
     if (!readable) attached.push({ toolUseIds: ids });
     else if (prompts.length > 0) attached.push({ toolUseIds: ids, text: prompts.join('\n\n') });
   }

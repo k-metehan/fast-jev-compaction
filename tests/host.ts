@@ -7,10 +7,11 @@
 // (Une, $ne, zpt, Hne, Wpt, gB, Doo/Moo); the names in the comments are the
 // minified ones. The Agent-tool extras of Hne (agentId, durationMs) are left
 // out. `apiViewOf` is a model of the host's normalization, written from what
-// 2.1.292 answered for a real transcript: consecutive user-side messages
-// merge into one, tool results first; trailing <system-reminder> texts fold
-// into the last tool result's text after a blank line; other texts (a skill
-// body) stay blocks of their own.
+// 2.1.292 answered for a real transcript: attachments first move up past
+// plain user messages (`bubbleAttachments`, the binary's AHr); then
+// consecutive user-side messages merge into one, tool results first; trailing
+// <system-reminder> texts fold into the last tool result's text after a blank
+// line; other texts (a skill body) stay blocks of their own.
 
 import type { ApiBlock, ApiMessage } from '../hooks/fast-jev.ts';
 
@@ -20,6 +21,7 @@ export type Raw = {
   uuid: string;
   isMeta?: boolean;
   isVirtual?: boolean;
+  taskDelivery?: unknown;
   toolUseResult?: unknown;
   message?: { content: string | RawBlock[] };
   attachment?: { type: string; [field: string]: unknown };
@@ -172,8 +174,39 @@ export function host() {
   };
 }
 
+/**
+ * AHr, the first step of the host's normalization for the API (Ek runs
+ * `AHr(messages, true, w)`; `w` is false for `$.session.messages({ as: 'api' })`,
+ * whose Fen passes Ek no model): every attachment moves up past the messages
+ * before it, plain user messages (typed or meta) included, to just after the
+ * nearest assistant message, user message opening with a tool_result, or task
+ * delivery. Attachments keep their order; virtual messages go.
+ */
+export function bubbleAttachments(entries: readonly Raw[]): Raw[] {
+  const out: Raw[] = [];
+  const pending: Raw[] = [];
+  for (let index = entries.length - 1; index >= 0; index -= 1) {
+    const entry = entries[index]!;
+    if (entry.type === 'attachment') {
+      pending.push(entry);
+      continue;
+    }
+    const content = entry.message?.content;
+    const stop =
+      entry.type === 'assistant' ||
+      (entry.type === 'user' &&
+        ((Array.isArray(content) && content[0]?.type === 'tool_result') || entry.taskDelivery !== undefined));
+    if (stop && pending.length > 0) out.push(...pending.splice(0));
+    // EO: a virtual user or assistant message is left out.
+    if (!((entry.type === 'user' || entry.type === 'assistant') && entry.isVirtual === true)) out.push(entry);
+  }
+  out.push(...pending);
+  return out.reverse();
+}
+
 /** Model of the API form 2.1.292 answers for `$.session.messages({ as: 'api' })` (see the header). */
-export function apiViewOf(entries: readonly Raw[]): ApiMessage[] {
+export function apiViewOf(transcript: readonly Raw[]): ApiMessage[] {
+  const entries = bubbleAttachments(transcript);
   const view: ApiMessage[] = [];
   const add = (role: ApiMessage['role'], blocks: ApiBlock[]): void => {
     if (blocks.length === 0) return;

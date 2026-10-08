@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  appendCompactionLog,
   COMPACTION_LOG_LINES,
   compactionLogPath,
   compactSession,
@@ -189,6 +190,7 @@ describe('session.compact hook', () => {
       },
       http: { fetch: async (url: string, init?: { body?: string }) => fetch(url, init) },
       fs: {
+        exists: async (path: string) => files.has(path),
         read: async (path: string) => {
           const text = files.get(path);
           if (text === undefined) throw new Error('ENOENT');
@@ -282,6 +284,41 @@ describe('session.compact hook', () => {
     expect(lines).toHaveLength(COMPACTION_LOG_LINES);
     expect(lines[0]).toBe('old 1');
     expect(lines.at(-1)).toMatch(/ manual kept /);
+  });
+
+  it('writes one line at a time, and never replaces a log it cannot read', async () => {
+    const files = new Map<string, string>();
+    const debug: string[] = [];
+    let unreadable = false;
+    const tick = () => new Promise((resolve) => setTimeout(resolve, 1));
+    const $ = {
+      env: { get: async (name: string) => (name === 'HOME' ? '/home/me' : undefined) },
+      ui: { log: (text: string) => debug.push(text) },
+      fs: {
+        exists: async (path: string) => files.has(path),
+        read: async (path: string) => {
+          await tick();
+          if (unreadable) throw new Error('EACCES: permission denied');
+          return files.get(path)!;
+        },
+        write: async (path: string, text: string) => {
+          await tick();
+          files.set(path, text);
+        },
+      },
+    };
+    // Two compactions (a session's and its subagent's) finishing together.
+    await Promise.all([appendCompactionLog($, 'manual kept A'), appendCompactionLog($, 'auto (agent x) kept B')]);
+    expect(files.get(LOG)!.split('\n').filter(Boolean).map((l) => l.slice(25))).toEqual([
+      'manual kept A',
+      'auto (agent x) kept B',
+    ]);
+
+    unreadable = true;
+    const before = files.get(LOG);
+    await appendCompactionLog($, 'manual kept C');
+    expect(files.get(LOG)).toBe(before);
+    expect(debug).toEqual(['compaction log not written (EACCES: permission denied)']);
   });
 
   it('puts its log under CLAUDE_CONFIG_DIR when set', async () => {

@@ -535,6 +535,7 @@ export const COMPACTION_LOG_LINES = 200;
 type LogHost = DebugLog & {
   env: { get: (name: string) => Promise<string | undefined> };
   fs: {
+    exists: (path: string) => Promise<boolean>;
     read: (path: string) => Promise<string>;
     write: (path: string, text: string) => Promise<void>;
   };
@@ -552,17 +553,24 @@ export async function compactionLogPath($: Pick<LogHost, 'env'>): Promise<string
   return base ? `${base.replace(/\/+$/, '')}/fast-jev-compaction/compactions.log` : undefined;
 }
 
+// $.fs has no append, so a line is a read and a whole write: the appends of
+// this session (its own and its subagents' compactions) run one at a time.
+let logQueue: Promise<void> = Promise.resolve();
+
 /** Appends one timestamped line, keeping the newest COMPACTION_LOG_LINES; never throws. */
-export async function appendCompactionLog($: LogHost, line: string, now: Date = new Date()): Promise<void> {
+export function appendCompactionLog($: LogHost, line: string, now: Date = new Date()): Promise<void> {
+  const appended = logQueue.then(() => writeCompactionLine($, line, now)).catch(() => undefined);
+  logQueue = appended;
+  return appended;
+}
+
+async function writeCompactionLine($: LogHost, line: string, now: Date): Promise<void> {
   try {
     const path = await compactionLogPath($);
     if (!path) return;
-    let previous = '';
-    try {
-      previous = await $.fs.read(path);
-    } catch {
-      // No log yet.
-    }
+    // Only a missing log starts afresh; one that exists but cannot be read is
+    // left as it is (the line is lost), never replaced.
+    const previous = (await $.fs.exists(path)) ? await $.fs.read(path) : '';
     const lines = previous.split('\n').filter((l) => l.length > 0);
     lines.push(`${now.toISOString()} ${line.replace(/\s*\n\s*/g, ' ')}`);
     await $.fs.write(path, `${lines.slice(-COMPACTION_LOG_LINES).join('\n')}\n`);

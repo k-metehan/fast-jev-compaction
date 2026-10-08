@@ -630,6 +630,40 @@ describe('requests', () => {
     expect(timers).toEqual([{ ms: 60_000, cancelled: true }]);
   });
 
+  it('sends no retry once the deadline has passed, or a request has stopped the rest', async () => {
+    const settle = () => new Promise((resolve) => setTimeout(resolve, 10));
+    const timers = () => {
+      const all: { ms: number; fn: () => void }[] = [];
+      const after = (ms: number, fn: () => void) => {
+        all.push({ ms, fn });
+        return { cancel: () => undefined };
+      };
+      return { after, fire: (ms: number) => all.filter((t) => t.ms === ms).forEach((t) => t.fn()) };
+    };
+
+    // t1 fails with a 503, and the deadline passes during its retry wait.
+    const late = oneCallPerRequest(1);
+    const clock = timers();
+    const busy = flaky(() => new JevRequestError(503, 'busy'));
+    const run = compact(late.messages, busy.asker, { ...late.options, after: clock.after });
+    await settle();
+    clock.fire(45_000);
+    await expect(run).rejects.toBeInstanceOf(JevDeadlineError);
+    clock.fire(RETRY_DELAY_MS);
+    await settle();
+    expect(busy.attempts.get('t1')).toBe(1);
+
+    // t1 fails with a 503 and waits; meanwhile t2's 401 stops the rest.
+    const two = oneCallPerRequest(2);
+    const clock2 = timers();
+    const jev = flaky((id) => (id === 't1' ? new JevRequestError(503, 'busy') : new JevRequestError(401, 'bad key')));
+    const stopped = compact(two.messages, jev.asker, { ...two.options, after: clock2.after });
+    await settle();
+    clock2.fire(RETRY_DELAY_MS);
+    await expect(stopped).rejects.toThrow('Jev request failed (401): bad key');
+    expect(Object.fromEntries(jev.attempts)).toEqual({ t1: 1, t2: 1 });
+  });
+
   it('stops at once when its signal aborts: no request, no retry, nothing new started', async () => {
     const { messages, options } = oneCallPerRequest(10);
     const before = flaky(() => undefined);

@@ -50,8 +50,9 @@ built-in compaction summary with the original messages.
    deadline (`deadlineMs`, 45 s, given a timer: `after`). A request that is rate
    limited (429) or hits a server error (5xx) is tried once more; one that is
    unauthorized (401, 403) or gets no answer is not, and no further request
-   starts. A malformed answer fails its request like an HTTP error. The calls of
-   a failed request are kept (`stats.failedRequests`).
+   or retry starts; nor does a retry once the deadline has passed. A malformed
+   answer fails its request like an HTTP error. The calls of a failed request
+   are kept (`stats.failedRequests`).
 6. Decisions per call, against `keepThreshold`:
    - `keepResult ≥ threshold` → keep call and result;
    - else `keepCall ≥ threshold` → keep the call, truncate the result to its

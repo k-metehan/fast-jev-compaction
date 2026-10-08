@@ -174,20 +174,25 @@ async function askBatch(
   );
 }
 
-/** `askBatch`, tried once more when the failure is worth it (isRetryable). */
+/**
+ * `askBatch`, tried once more when the failure is worth it (isRetryable).
+ * `halted` names what ended the compaction during the wait (an abort, the
+ * deadline, a failure every request shares), or undefined: then no retry.
+ */
 async function askWithRetry(
   asker: JevAsker,
   state: CompactionState,
   batch: readonly ToolCall[],
   wait: (ms: number) => Promise<void>,
-  signal: AbortSignal | undefined,
+  halted: () => unknown,
 ): Promise<Map<string, CallAnswer>> {
   try {
     return await askBatch(asker, state, batch);
   } catch (error) {
     if (!isRetryable(error)) throw error;
     await wait(RETRY_DELAY_MS);
-    if (signal?.aborted) throw new CompactionInterrupted();
+    const why = halted();
+    if (why !== undefined) throw why;
     return askBatch(asker, state, batch);
   }
 }
@@ -444,10 +449,10 @@ function count(decisions: readonly CallDecision[], reason: CallDecision['reason'
  * tool results (`attached`) survives: put back as text, or its calls kept.
  * Requests run at most MAX_CONCURRENT_REQUESTS at a time; one that is rate
  * limited (429) or hits a server error (5xx) is tried once more. A request
- * unauthorized (401, 403) or unanswered stops the ones not yet started. The
- * calls of a request that fails are kept. Past `deadlineMs` (with `after`)
- * compact throws; when `signal` aborts it stops at once and throws
- * CompactionInterrupted. A malformed answer fails its request as an HTTP
+ * unauthorized (401, 403) or unanswered stops the ones not yet started and
+ * the retries not yet sent. The calls of a request that fails are kept. Past
+ * `deadlineMs` (with `after`) compact throws, and sends no retry after; when
+ * `signal` aborts it stops at once and throws CompactionInterrupted. A malformed answer fails its request as an HTTP
  * error does. Throws when no request is answered or the history cannot be
  * fitted; the caller decides whether to fall back.
  */
@@ -503,12 +508,14 @@ export async function compact(
             timer = after(ms, done);
           })
         : Promise.resolve();
-    // After a failure every other request would share, start no more.
+    // After a failure every other request would share, the deadline or an
+    // abort, start no more requests and send no more retries.
     let stop: unknown;
+    const halted = (): unknown => (signal?.aborted ? new CompactionInterrupted() : stop);
     const work = settleLimited(batches, MAX_CONCURRENT_REQUESTS, async (batch) => {
       if (stop !== undefined) throw stop;
       try {
-        return await askWithRetry(counted, state.state, batch, wait, signal);
+        return await askWithRetry(counted, state.state, batch, wait, halted);
       } catch (error) {
         if (stopsAll(error)) stop ??= error;
         throw error;

@@ -90,9 +90,9 @@ do. The `session.compact` hook runs up to eight Jev requests at once, gives
 up after 45 s in all (timers on `$.clock.after`: the hook's 10 s budget runs
 through a `$.clock.sleep` but not through a fetch), and
 tries a rate-limited (429) or failed (5xx) one once more after a second; an
-unauthorized (401, 403) or unanswered one stops the requests not yet
-started. The calls of a request that fails are kept. If every request fails,
-the response is malformed, the key is unavailable, the history cannot be
+unauthorized (401, 403) or unanswered one stops the requests and retries
+not yet started, as the deadline does. The calls of a request that fails
+are kept. If every request fails, the response is malformed, the key is unavailable, the history cannot be
 fitted into the state budget, or the estimated reduction is below
 `minReductionRatio`, the hook delegates to Claude Code's built-in compaction.
 The only thing the user sees is a `compaction done` toast when the pruned

@@ -304,7 +304,17 @@ export function attachedContent(
         readable = false;
         continue;
       }
-      const text = contentText(block['content']);
+      const content = block['content'];
+      // Blocks other than text and images (tool_reference: the deferred tools a
+      // ToolSearch loaded) go with a rebuilt result, and the built-in summary
+      // would have carried them over (preCompactDiscoveredTools): keep the call.
+      if (
+        Array.isArray(content) &&
+        content.some((part) => !['text', 'image'].includes(String((part as { type?: unknown } | null)?.type)))
+      ) {
+        readable = false;
+      }
+      const text = contentText(content);
       if (text.trim() === mine) continue;
       if (text.startsWith(mine)) {
         const pieces = reminderPieces(text.slice(mine.length));

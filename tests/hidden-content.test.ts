@@ -235,6 +235,28 @@ describe('hidden messages beside a rewritten tool result (Claude Code 2.1.292)',
     expect(count(dropped.final, SKILL)).toBe(1);
   });
 
+  it('keeps a ToolSearch call: its result loads deferred tools the built-in summary would carry over', async () => {
+    const t = transcriptBuilder();
+    const raw: Raw[] = [
+      t.prompt('Read my mail'),
+      t.thinking(),
+      t.use('ts', 'ToolSearch', { query: 'gmail' }),
+      t.toolSearch('ts', 'mcp__gmail__search_threads'),
+      t.thinking(),
+      t.use('g', 'mcp__gmail__search_threads', { q: 'invoice' }),
+      t.result('g', output(1)),
+      t.thinking(),
+      t.use('c', 'Bash', { command: 'step c' }),
+      t.result('c', output(3)),
+      t.say('done'),
+    ];
+    const { final, logs } = await compactThroughHook(raw, answers('drop_call', ['t1', 't2']));
+    expect(count(final, '"tool_name":"mcp__gmail__search_threads"')).toBe(1);
+    expect(count(final, 'Tool loaded.')).toBe(0);
+    expect(count(final, '"q":"invoice"')).toBe(0);
+    expect(logs.join('\n')).toMatch(/1 call_dropped, 1 pinned, 1 protected/);
+  });
+
   it('falls back to the built-in summary when the host gives no API view', async () => {
     const { raw } = session();
     const denied = await compactThroughHook(raw, answers('drop_call', ['t2']), () => ({ deny: 'no such agent' }));

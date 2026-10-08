@@ -140,6 +140,13 @@ stage was needed, and the number of requests.
   counts as a fixed 6000 characters.
 - Calibration is at the request level; a probability is not a proof that a
   result is safe to delete. The assistant can always re-run the tool.
+- In Claude Code, records the model never sees (`deferred_tools_record`,
+  `prompt_snapshot`, `command_permissions`, …) go with a dropped or rebuilt
+  row: the API form does not show them. The built-in summary drops them too,
+  and the host records the deferred-tools state afresh on the next request.
+  What the built-in summary does carry over, the deferred tools a ToolSearch
+  loaded (its boundary's `preCompactDiscoveredTools`), stays: a result with
+  `tool_reference` blocks keeps its call.
 - The full state is repeated with every request, so a history near the state
   ceiling costs one request per handful of questions.
 

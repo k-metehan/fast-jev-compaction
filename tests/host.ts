@@ -201,6 +201,10 @@ export function apiViewOf(entries: readonly Raw[]): ApiMessage[] {
     if (message.role !== 'user') continue;
     const results = message.content.filter((b) => b.type === 'tool_result');
     if (results.length === 0) continue;
+    // The host adds a note after a result that loads deferred tools.
+    if (results.some((b) => Array.isArray(b.content) && b.content.some((part: RawBlock) => part.type === 'tool_reference'))) {
+      message.content.push({ type: 'text', text: 'Tool loaded.' });
+    }
     const rest = message.content.filter((b) => b.type !== 'tool_result');
     const foldable =
       rest.length > 0 && rest.every((b) => b.type === 'text' && String(b.text).startsWith('<system-reminder>'));
@@ -256,6 +260,15 @@ export function transcriptBuilder() {
       uuid: uuid(),
       toolUseResult: isError ? text : { stdout: text },
       message: { content: [{ type: 'tool_result', tool_use_id: id, content: text, ...(isError && { is_error: true }) }] },
+    }),
+    /** A ToolSearch result: the deferred tools it loads, as tool_reference blocks. */
+    toolSearch: (id: string, ...names: string[]): Raw => ({
+      type: 'user',
+      uuid: uuid(),
+      toolUseResult: { matches: names },
+      message: {
+        content: [{ type: 'tool_result', tool_use_id: id, content: names.map((tool_name) => ({ type: 'tool_reference', tool_name })) }],
+      },
     }),
     /** A user message of several text blocks (a denial with the user's feedback). */
     userBlocks: (...texts: string[]): Raw => ({

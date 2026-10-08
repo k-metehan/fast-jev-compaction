@@ -579,6 +579,17 @@ async function writeCompactionLine($: LogHost, line: string, now: Date): Promise
   }
 }
 
+/** Which compaction a log line is about: its trigger, and the subagent's id. */
+function compactionLabel(event: { trigger: string; agentId?: string }): string {
+  return `${event.trigger}${event.agentId === undefined ? '' : ` (agent ${event.agentId})`}`;
+}
+
+/** One compaction's outcome, to the debug log and the plugin's own log. */
+async function logOutcome($: LogHost, event: { trigger: string; agentId?: string }, text: string): Promise<void> {
+  debugLog($, text);
+  await appendCompactionLog($, `${compactionLabel(event)} ${text}`);
+}
+
 export const register: Register = (on: On, options: PluginOptions) => {
   const configured = resolveHookConfig(options);
   let compacting = false;
@@ -587,11 +598,7 @@ export const register: Register = (on: On, options: PluginOptions) => {
   let headless = false;
 
   on('session.compact', async ($, event, next) => {
-    const which = `${event.trigger}${event.agentId === undefined ? '' : ` (agent ${event.agentId})`}`;
-    const report = async (text: string): Promise<void> => {
-      debugLog($, text);
-      await appendCompactionLog($, `${which} ${text}`);
-    };
+    const report = (text: string): Promise<void> => logOutcome($, event, text);
     // Esc, a hook above that settled first, or the budget: Claude Code has moved
     // on, so stop, log it as such, and hand back nothing it would act on.
     const interrupted = async () => {
@@ -632,7 +639,9 @@ export const register: Register = (on: On, options: PluginOptions) => {
         );
         return next(event);
       }
-      await report(`kept ${messages.length}/${event.messages.length} messages, no summary (${summarize(result)})`);
+      // Handed back, not yet installed: Claude Code checks it on the way up
+      // (a refusal reaches the .catch below) and installs it after this hook.
+      await report(`returned ${messages.length}/${event.messages.length} messages, no summary (${summarize(result)})`);
       $.ui.toast('compaction done');
       return { messages };
     } catch (error) {
@@ -640,6 +649,21 @@ export const register: Register = (on: On, options: PluginOptions) => {
       await report(`fallback to built-in summary (${error instanceof Error ? error.message : String(error)})`);
       return next(event);
     }
+  }).catch(async ($, event, next) => {
+    // Claude Code refused what the hook returned (a shape it does not take),
+    // the hook threw, or it overran its budget: log it, then let Claude Code
+    // compact on its own (or, after a fallback, replay what that settled to).
+    const { kind, message } = next.error;
+    // Under its own call the hook's $ calls reject: nothing can be logged.
+    if (kind !== 're-entry') {
+      const why = kind === 'timeout' ? 'over its time budget' : (message ?? 'it threw');
+      await logOutcome(
+        $,
+        event,
+        next.called ? `failed in Claude Code after falling back (${why})` : `failed in Claude Code (${why}); built-in summary instead`,
+      );
+    }
+    return next(event);
   });
 
   on('turn.complete', async ($, event: TurnCompleteInput, next) => {

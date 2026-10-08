@@ -160,9 +160,14 @@ describe('session.compact hook', () => {
     files: Map<string, string> = new Map(),
     event: { instructions?: string } = {},
     signal?: AbortSignal,
+    caught?: { kind: string; message?: string; called: boolean },
   ) {
     const handlers: Record<string, Function> = {};
-    register(((name: string, h: Function) => { handlers[name] = h; }) as never, { preserveRecentMessages: 1 } as never);
+    const catches: Record<string, Function> = {};
+    register(((name: string, h: Function) => {
+      handlers[name] = h;
+      return { catch: (c: Function) => { catches[name] = c; } };
+    }) as never, { preserveRecentMessages: 1 } as never);
     const logs: { text: string; to?: string }[] = [];
     const toasts: string[] = [];
     // The API form of transcript(): nothing kept beside its rows.
@@ -212,8 +217,10 @@ describe('session.compact hook', () => {
         return {};
       },
       { signal: signal ?? new AbortController().signal },
+      caught && { error: { kind: caught.kind, message: caught.message, budget: 1000 }, called: caught.called },
     );
-    return handlers['session.compact']($, { trigger: 'manual', messages: transcript(), ...event }, next).then(
+    const hook = caught ? catches['session.compact']! : handlers['session.compact']!;
+    return hook($, { trigger: 'manual', messages: transcript(), ...event }, next).then(
       (returned: unknown) => ({
         returned,
         nextCalls,
@@ -229,8 +236,8 @@ describe('session.compact hook', () => {
     const { logs, toasts, lines } = await run(jevFetch(() => 0.1));
     expect(toasts).toEqual(['compaction done']);
     expect(logs).toHaveLength(1);
-    expect(logs[0]).toEqual({ text: expect.stringMatching(/^kept/), to: 'debug' });
-    expect(lines).toEqual([expect.stringMatching(/^\d{4}-\d\d-\d\dT[\d:.]+Z manual kept \d+\/7 messages, no summary \(/)]);
+    expect(logs[0]).toEqual({ text: expect.stringMatching(/^returned/), to: 'debug' });
+    expect(lines).toEqual([expect.stringMatching(/^\d{4}-\d\d-\d\dT[\d:.]+Z manual returned \d+\/7 messages, no summary \(/)]);
   });
 
   it('shows nothing on a fallback and logs its reason to the debug log and its own log', async () => {
@@ -278,12 +285,30 @@ describe('session.compact hook', () => {
     expect(lines).toEqual([expect.stringMatching(/Z manual interrupted: Claude Code moved on before the compaction finished; nothing handed back$/)]);
   });
 
+  it('logs what Claude Code refuses or what fails, through its .catch, and lets Claude Code compact', async () => {
+    const refused = await run(jevFetch(() => 0.1), new Map(), {}, undefined, {
+      kind: 'throw',
+      message: 'neither { messages } nor { skip }',
+      called: false,
+    });
+    expect(refused.nextCalls).toBe(1);
+    expect(refused.lines).toEqual([
+      expect.stringMatching(/Z manual failed in Claude Code \(neither \{ messages \} nor \{ skip \}\); built-in summary instead$/),
+    ]);
+    const late = await run(jevFetch(() => 0.1), new Map(), {}, undefined, { kind: 'timeout', called: true });
+    expect(late.lines).toEqual([expect.stringMatching(/Z manual failed in Claude Code after falling back \(over its time budget\)$/)]);
+    // Raised beneath its own call, the hook did not run and its $ calls reject.
+    const reentry = await run(jevFetch(() => 0.1), new Map(), {}, undefined, { kind: 're-entry', called: false });
+    expect(reentry.lines).toEqual([]);
+    expect(reentry.nextCalls).toBe(1);
+  });
+
   it('keeps its own log to the newest lines, one per compaction', async () => {
     const files = new Map([[LOG, Array.from({ length: COMPACTION_LOG_LINES }, (_, i) => `old ${i}`).join('\n')]]);
     const { lines } = await run(jevFetch(() => 0.1), files);
     expect(lines).toHaveLength(COMPACTION_LOG_LINES);
     expect(lines[0]).toBe('old 1');
-    expect(lines.at(-1)).toMatch(/ manual kept /);
+    expect(lines.at(-1)).toMatch(/ manual returned /);
   });
 
   it('writes one line at a time, and never replaces a log it cannot read', async () => {

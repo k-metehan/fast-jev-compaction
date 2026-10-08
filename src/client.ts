@@ -1,4 +1,4 @@
-import { buildJevRequest, parseJevResponse } from './request.js';
+import { buildJevRequest, JevTransportError, parseJevResponse } from './request.js';
 import type { JevAsker, JevQuestions, JevResponse, JevState } from './types.js';
 
 export interface JevClientOptions {
@@ -33,11 +33,18 @@ export class JevClient implements JevAsker {
       state,
       questions,
     );
-    const response = await this.fetcher(request.url, {
-      method: request.method,
-      headers: request.headers,
-      body: request.body,
-    });
-    return parseJevResponse(response.status, response.ok, await response.text());
+    let response: Response;
+    let text: string;
+    try {
+      response = await this.fetcher(request.url, {
+        method: request.method,
+        headers: request.headers,
+        body: request.body,
+      });
+      text = await response.text();
+    } catch (error) {
+      throw new JevTransportError(error);
+    }
+    return parseJevResponse(response.status, response.ok, text);
   }
 }

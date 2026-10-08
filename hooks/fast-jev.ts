@@ -9,7 +9,7 @@ import type {
 } from 'claude-code';
 
 import { compact, reductionRatio, resolveOptions } from '../src/compact.js';
-import { buildJevRequest, DEFAULT_MODEL, parseJevResponse } from '../src/request.js';
+import { buildJevRequest, DEFAULT_MODEL, JevTransportError, parseJevResponse } from '../src/request.js';
 import type {
   AttachedContent,
   CompactOptions,
@@ -93,11 +93,16 @@ export function jevAsker(fetchFn: HookFetch, apiKey: string, model: string): Jev
   return {
     async ask(state, questions) {
       const request = buildJevRequest({ apiKey, model }, state, questions);
-      const response = await fetchFn(request.url, {
-        method: request.method,
-        headers: request.headers,
-        body: request.body,
-      });
+      let response: HookFetchResponse;
+      try {
+        response = await fetchFn(request.url, {
+          method: request.method,
+          headers: request.headers,
+          body: request.body,
+        });
+      } catch (error) {
+        throw new JevTransportError(error);
+      }
       return parseJevResponse(response.status, response.ok, response.text);
     },
   };
@@ -333,9 +338,13 @@ export function summarize(result: CompactResult): string {
     stats.protected > 0 ? `${stats.protected} protected` : '',
     stats.carried > 0 ? `${stats.carried} attached put back` : '',
   ].filter(Boolean);
+  const failed =
+    stats.failedRequests > 0
+      ? `, ${stats.failedRequests} failed and their calls kept (${stats.requestError ?? 'unknown error'})`
+      : '';
   return `${percent(reductionRatio(result))} reduction; ${
     parts.join(', ') || 'no tool calls'
-  }; state ~${stats.stateTokens} tokens (${stats.stateStage}) in ${stats.requests} request(s)`;
+  }; state ~${stats.stateTokens} tokens (${stats.stateStage}) in ${stats.requests} request(s)${failed}`;
 }
 
 const UI_LOG_MAX_CHARS = 4096;
@@ -462,7 +471,19 @@ export const register: Register = (on: On, options: PluginOptions) => {
       const view = await apiView($, event.agentId);
       // What Claude Code keeps beside the rows; a row rebuilt or left out would lose it.
       const attached = attachedContent(event.messages, view);
-      const config = { ...configured, apiKey, attached };
+      const config: HookConfig = {
+        ...configured,
+        apiKey,
+        attached,
+        // The wait before a request is tried again; a failed wait just retries sooner.
+        sleep: async (ms) => {
+          try {
+            await $.clock.sleep(ms, { signal: next.signal });
+          } catch {
+            // Retry sooner.
+          }
+        },
+      };
       const fetchFn: HookFetch = async (url, init) => {
         const response = await $.http.fetch(url, init);
         return { status: response.status, ok: response.ok, text: response.text };

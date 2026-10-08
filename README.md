@@ -43,8 +43,10 @@ built-in compaction summary with the original messages.
    tool would not do).
 5. Questions are split into as many requests as needed so state plus questions
    stays under `maxRequestTokens` (30k by default, under Jev's 32k request
-   limit). The same full state is resent with every request; requests run
-   concurrently and their answers are merged.
+   limit). The same full state is resent with every request; up to four
+   requests run at once and their answers are merged. A request that is rate
+   limited (429), hits a server error (5xx) or gets no answer is tried once
+   more; if it still fails, its calls are kept (`stats.failedRequests`).
 6. Decisions per call, against `keepThreshold`:
    - `keepResult ≥ threshold` → keep call and result;
    - else `keepCall ≥ threshold` → keep the call, truncate the result to its
@@ -62,8 +64,8 @@ built-in compaction summary with the original messages.
    is rebuilt or removed, its text is put back right after them; otherwise, or
    when it has no text form, those calls are kept (`protected`).
 
-Jev failures, malformed answers, a missing key, or a history that cannot be
-fitted throw; the caller (or the Claude Code hook) decides what to fall back to.
+A Jev failure on every request, malformed answers, a missing key, or a
+history that cannot be fitted throw; the caller (or the Claude Code hook) decides what to fall back to.
 
 ## Install and usage
 

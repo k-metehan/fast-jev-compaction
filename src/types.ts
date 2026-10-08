@@ -138,6 +138,11 @@ export interface CompactOptions {
   truncateHeadChars?: number;
   /** Content the host keeps beside tool results (see AttachedContent). Default none. */
   attached?: readonly AttachedContent[];
+  /**
+   * Waits before a Jev request is tried again (rate limited, a server error,
+   * no answer). Default: try again at once.
+   */
+  sleep?: (ms: number) => Promise<void>;
 }
 
 export interface ResolvedCompactOptions {
@@ -172,6 +177,10 @@ export interface CompactResult {
     /** Which fitting stage the state needed, '' when no request was made. */
     stateStage: string;
     requests: number;
+    /** Requests that failed even when tried again; their calls were kept. */
+    failedRequests: number;
+    /** Why the first of them failed. */
+    requestError?: string;
     ms: number;
   };
 }

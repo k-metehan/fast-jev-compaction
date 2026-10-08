@@ -172,10 +172,12 @@ describe('session.compact hook', () => {
       ],
     }));
     const env: Record<string, string> = { TYPESAFE_API_KEY: 'k', HOME: '/home/me' };
+    const sleeps: number[] = [];
     const $ = {
       env: { get: async (name: string) => env[name] },
       settings: { read: async () => ({}) },
       session: { messages: async () => view },
+      clock: { sleep: async (ms: number) => void sleeps.push(ms) },
       http: { fetch: async (url: string, init?: { body?: string }) => fetch(url, init) },
       fs: {
         read: async (path: string) => {
@@ -195,6 +197,7 @@ describe('session.compact hook', () => {
     return handlers['session.compact']($, { trigger: 'manual', messages: transcript() }, async () => ({})).then(() => ({
       logs,
       toasts,
+      sleeps,
       lines: (files.get(LOG) ?? '').split('\n').filter(Boolean),
     }));
   }
@@ -213,6 +216,17 @@ describe('session.compact hook', () => {
     expect(logs).toHaveLength(1);
     expect(logs[0]).toEqual({ text: expect.stringMatching(/^fallback/), to: 'debug' });
     expect(lines).toEqual([expect.stringMatching(/Z manual fallback to built-in summary \(Jev request failed \(500\): x\)$/)]);
+  });
+
+  it('tries a failed Jev request once more, after a second on the host clock', async () => {
+    let calls = 0;
+    const { sleeps, lines } = await run(async () => {
+      calls += 1;
+      return { status: 503, ok: false, text: 'busy' };
+    });
+    expect(calls).toBe(2);
+    expect(sleeps).toEqual([1000]);
+    expect(lines[0]).toMatch(/fallback to built-in summary \(Jev request failed \(503\): busy\)$/);
   });
 
   it('keeps its own log to the newest lines, one per compaction', async () => {

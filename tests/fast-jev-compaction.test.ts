@@ -10,6 +10,11 @@ import {
   estimateTokens,
   fitState,
   IMAGE_CHARS,
+  isRetryable,
+  JevRequestError,
+  JevTransportError,
+  MAX_CONCURRENT_REQUESTS,
+  RETRY_DELAY_MS,
   JevClient,
   messageChars,
   questionsFor,
@@ -448,6 +453,104 @@ describe('compact', () => {
     await expect(compact(transcript(), broken, { preserveRecentMessages: 1 })).rejects.toThrow(
       /Invalid Jev answer/,
     );
+  });
+});
+
+describe('requests', () => {
+  /** n calls with big results, and options that put each call in a request of its own. */
+  function oneCallPerRequest(n: number) {
+    const messages = [message('user', 'read them all')];
+    for (let i = 0; i < n; i += 1) {
+      messages.push(call(`c${i}`, 'Read', { file_path: `f${i}.ts` }, ''), result(`c${i}`, 'x'.repeat(2000)));
+    }
+    messages.push(message('assistant', 'done'));
+    const calls = collectToolCalls(messages, 1);
+    const stateTokens = fitState(messages, calls, { maxStateTokens: 25_000, preserveRecentMessages: 1, goal: '' }).tokens;
+    const question = Math.max(...calls.map((c) => estimateTokens(JSON.stringify(questionsFor(c)))));
+    return { messages, options: { preserveRecentMessages: 1, maxRequestTokens: stateTokens + 20 + question + 5 } };
+  }
+
+  /** A Jev that drops every result, after a tick, failing as `fail` says per call id and attempt. */
+  function flaky(fail: (id: string, attempt: number) => Error | undefined) {
+    const attempts = new Map<string, number>();
+    let inFlight = 0;
+    let most = 0;
+    const asker: JevAsker = {
+      async ask(_state, questions) {
+        const id = Object.keys(questions)[0]!.replace(/^(call|result)_/, '');
+        const attempt = (attempts.get(id) ?? 0) + 1;
+        attempts.set(id, attempt);
+        inFlight += 1;
+        most = Math.max(most, inFlight);
+        await new Promise((resolve) => setTimeout(resolve, 2));
+        inFlight -= 1;
+        const error = fail(id, attempt);
+        if (error) throw error;
+        return {
+          answers: Object.fromEntries(
+            Object.keys(questions).map((key) => [key, { noul: key.startsWith('call_') ? 0.9 : 0.1 }]),
+          ),
+        };
+      },
+    };
+    return { asker, attempts, most: () => most };
+  }
+
+  it('runs at most four requests at once', async () => {
+    const { messages, options } = oneCallPerRequest(10);
+    const jev = flaky(() => undefined);
+    const output = await compact(messages, jev.asker, options);
+    expect(output.stats.requests).toBe(10);
+    expect(jev.most()).toBe(MAX_CONCURRENT_REQUESTS);
+    expect(output.stats.resultsDropped).toBe(10);
+  });
+
+  it('tries a rate-limited, failed or unanswered request once more, after a wait', async () => {
+    const { messages, options } = oneCallPerRequest(3);
+    const waits: number[] = [];
+    const errors: Record<string, Error> = {
+      t1: new JevRequestError(429, 'slow down'),
+      t2: new JevRequestError(503, 'busy'),
+      t3: new JevTransportError(new Error('timed out')),
+    };
+    const jev = flaky((id, attempt) => (attempt === 1 ? errors[id] : undefined));
+    const output = await compact(messages, jev.asker, { ...options, sleep: async (ms) => void waits.push(ms) });
+    expect([...jev.attempts.values()]).toEqual([2, 2, 2]);
+    expect(waits).toEqual([RETRY_DELAY_MS, RETRY_DELAY_MS, RETRY_DELAY_MS]);
+    expect(output.stats).toMatchObject({ resultsDropped: 3, failedRequests: 0 });
+  });
+
+  it('keeps the calls of a request that still fails, and does not retry what will not change', async () => {
+    const { messages, options } = oneCallPerRequest(3);
+    const jev = flaky((id) =>
+      id === 't2' ? new JevRequestError(500, 'down') : id === 't3' ? new JevRequestError(400, 'bad request') : undefined,
+    );
+    const output = await compact(messages, jev.asker, options);
+    expect(Object.fromEntries(jev.attempts)).toEqual({ t1: 1, t2: 2, t3: 1 });
+    expect(output.decisions.filter((d) => !d.reason.startsWith('pinned')).map((d) => [d.id, d.action])).toEqual([
+      ['t1', 'drop_result'],
+      ['t2', 'keep'],
+      ['t3', 'keep'],
+    ]);
+    expect(output.stats.failedRequests).toBe(2);
+    expect(output.stats.requestError).toBe('Jev request failed (500): down');
+    expect(reductionRatio(output)).toBeGreaterThan(0);
+  });
+
+  it('throws when no request is answered', async () => {
+    const { messages, options } = oneCallPerRequest(3);
+    const jev = flaky(() => new JevRequestError(502, 'gateway'));
+    await expect(compact(messages, jev.asker, options)).rejects.toThrow('Jev request failed (502): gateway');
+    expect([...jev.attempts.values()]).toEqual([2, 2, 2]);
+  });
+
+  it('marks a failed fetch as unanswered, so it is retried', async () => {
+    const client = new JevClient({ apiKey: 'k', fetch: (async () => { throw new TypeError('fetch failed'); }) as typeof fetch });
+    const error = await client.ask('s', {}).catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(JevTransportError);
+    expect(isRetryable(error)).toBe(true);
+    expect(isRetryable(new JevRequestError(404, 'x'))).toBe(false);
+    expect(isRetryable(new Error('Invalid Jev answer for call_t1'))).toBe(false);
   });
 });
 

@@ -1,4 +1,4 @@
-import { noulAnswer } from './request.js';
+import { isRetryable, noulAnswer } from './request.js';
 import { collectToolCalls, estimateTokens, fitState, imageCount } from './state.js';
 import type {
   AttachedContent,
@@ -30,6 +30,12 @@ export const DEFAULT_OPTIONS: ResolvedCompactOptions = {
  * about the 1,600 tokens Claude reads a full-size image as.
  */
 export const IMAGE_CHARS = 6_000;
+
+/** Jev requests in flight at once. */
+export const MAX_CONCURRENT_REQUESTS = 4;
+
+/** The wait before a failed request is tried again, when `sleep` is given. */
+export const RETRY_DELAY_MS = 1_000;
 
 /** Tokens the request envelope (`model`, key names) adds around state and questions. */
 const REQUEST_OVERHEAD_TOKENS = 20;
@@ -142,6 +148,45 @@ async function askBatch(
       },
     ]),
   );
+}
+
+/** `askBatch`, tried once more when the failure is worth it (isRetryable). */
+async function askWithRetry(
+  asker: JevAsker,
+  state: CompactionState,
+  batch: readonly ToolCall[],
+  sleep: ((ms: number) => Promise<void>) | undefined,
+): Promise<Map<string, CallAnswer>> {
+  try {
+    return await askBatch(asker, state, batch);
+  } catch (error) {
+    if (!isRetryable(error)) throw error;
+    await sleep?.(RETRY_DELAY_MS);
+    return askBatch(asker, state, batch);
+  }
+}
+
+/** Runs `run` over `items` with at most `limit` in flight; settles each, in order. */
+async function settleLimited<T, R>(
+  items: readonly T[],
+  limit: number,
+  run: (item: T) => Promise<R>,
+): Promise<PromiseSettledResult<R>[]> {
+  const settled: PromiseSettledResult<R>[] = new Array(items.length);
+  let next = 0;
+  const worker = async (): Promise<void> => {
+    while (next < items.length) {
+      const index = next;
+      next += 1;
+      try {
+        settled[index] = { status: 'fulfilled', value: await run(items[index]!) };
+      } catch (reason) {
+        settled[index] = { status: 'rejected', reason };
+      }
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
+  return settled;
 }
 
 function truncatedResultText(text: string, isError: boolean, headChars: number): string {
@@ -355,7 +400,10 @@ function count(decisions: readonly CallDecision[], reason: CallDecision['reason'
  * stay. The whole history (results omitted, fitted into `maxStateTokens`) is
  * sent as state with every batch of questions. Content the host keeps beside
  * tool results (`attached`) survives: put back as text, or its calls kept.
- * Throws when Jev fails or the history cannot be fitted; the caller decides
+ * Requests run at most MAX_CONCURRENT_REQUESTS at a time; one that is rate
+ * limited, hits a server error or gets no answer is tried once more. The calls
+ * of a request that still fails are kept. Throws when no request is answered,
+ * Jev answers malformed, or the history cannot be fitted; the caller decides
  * whether to fall back.
  */
 export async function compact(
@@ -381,16 +429,23 @@ export async function compact(
   let fitted: { tokens: number; stage: string } = { tokens: 0, stage: '' };
   let batches: ToolCall[][] = [];
   const answers = new Map<string, CallAnswer>();
+  const failures: unknown[] = [];
   if (candidates.length > 0) {
     const state = fitState(messages, calls, resolved);
     fitted = state;
     batches = batchCalls(candidates, state.tokens, resolved);
-    const answered = await Promise.all(
-      batches.map((batch) => askBatch(asker, state.state, batch)),
+    const settled = await settleLimited(batches, MAX_CONCURRENT_REQUESTS, (batch) =>
+      askWithRetry(asker, state.state, batch, options.sleep),
     );
-    for (const map of answered) for (const [id, answer] of map) answers.set(id, answer);
+    for (const outcome of settled) {
+      if (outcome.status === 'rejected') failures.push(outcome.reason);
+      else for (const [id, answer] of outcome.value) answers.set(id, answer);
+    }
+    // Nothing answered: let the caller fall back with the reason.
+    if (failures.length === batches.length) throw failures[0];
   }
 
+  // A call Jev did not answer (its request failed) is kept.
   const decided = calls.map((call) =>
     decideCall(call, answers.get(call.id) ?? { keepCall: 1, keepResult: 1 }, resolved),
   );
@@ -423,6 +478,10 @@ export async function compact(
       stateTokens: fitted.tokens,
       stateStage: fitted.stage,
       requests: batches.length,
+      failedRequests: failures.length,
+      ...(failures.length > 0 && {
+        requestError: failures[0] instanceof Error ? failures[0].message : String(failures[0]),
+      }),
       ms: Date.now() - started,
     },
   };

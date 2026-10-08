@@ -126,6 +126,8 @@ export interface FittedState {
 export interface CompactOptions {
   /** Ongoing task description; defaults to the last few user prompts. */
   goal?: string;
+  /** What the user asked this compaction to keep (`/compact <instructions>`); added to the goal. */
+  instructions?: string;
   /** Minimum keep probability for a call or result to stay. Default 0.5. */
   keepThreshold?: number;
   /** Newest messages never touched (the first message is always kept). Default 6. */
@@ -147,6 +149,7 @@ export interface CompactOptions {
 
 export interface ResolvedCompactOptions {
   goal: string;
+  instructions: string;
   keepThreshold: number;
   preserveRecentMessages: number;
   maxStateTokens: number;

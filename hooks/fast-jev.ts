@@ -475,6 +475,8 @@ export const register: Register = (on: On, options: PluginOptions) => {
         ...configured,
         apiKey,
         attached,
+        // `/compact <instructions>`: what the user wants kept, for Jev's goal.
+        ...(event.instructions?.trim() && { instructions: event.instructions }),
         // The wait before a request is tried again; a failed wait just retries sooner.
         sleep: async (ms) => {
           try {

@@ -14,7 +14,8 @@ item is kept when Jev's probability reaches `keepThreshold`; a dropped result
 is truncated to its first `truncateHeadChars` characters plus a one-line note
 and loses its images (the hook counts them from the API form, since the rows
 hold a result's text only),
-and a dropped call disappears with its result.
+and a dropped call disappears with its result. The text after `/compact`
+(`e.instructions`) is added to the goal Jev is given.
 
 Claude Code hands the hook one row per user or assistant message and keeps
 every other message (reminders, messages typed while a tool ran, skill

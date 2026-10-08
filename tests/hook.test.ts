@@ -157,6 +157,7 @@ describe('session.compact hook', () => {
   function run(
     fetch: (url: string, init?: { body?: string }) => Promise<{ status: number; ok: boolean; text: string }>,
     files: Map<string, string> = new Map(),
+    event: { instructions?: string } = {},
   ) {
     const handlers: Record<string, Function> = {};
     register(((name: string, h: Function) => { handlers[name] = h; }) as never, { preserveRecentMessages: 1 } as never);
@@ -194,7 +195,7 @@ describe('session.compact hook', () => {
         toast: (text: string) => toasts.push(text),
       },
     };
-    return handlers['session.compact']($, { trigger: 'manual', messages: transcript() }, async () => ({})).then(() => ({
+    return handlers['session.compact']($, { trigger: 'manual', messages: transcript(), ...event }, async () => ({})).then(() => ({
       logs,
       toasts,
       sleeps,
@@ -216,6 +217,12 @@ describe('session.compact hook', () => {
     expect(logs).toHaveLength(1);
     expect(logs[0]).toEqual({ text: expect.stringMatching(/^fallback/), to: 'debug' });
     expect(lines).toEqual([expect.stringMatching(/Z manual fallback to built-in summary \(Jev request failed \(500\): x\)$/)]);
+  });
+
+  it('hands Jev the text after /compact as part of the goal', async () => {
+    const bodies: string[] = [];
+    await run(jevFetch(() => 0.1, bodies), new Map(), { instructions: 'keep the npm test output' });
+    expect(JSON.parse(bodies[0]!).state.goal).toMatch(/\nThe user asked this compaction to keep: keep the npm test output$/);
   });
 
   it('tries a failed Jev request once more, after a second on the host clock', async () => {

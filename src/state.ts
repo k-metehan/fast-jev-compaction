@@ -203,9 +203,16 @@ export function goalFromMessages(messages: readonly Message[]): string {
 export function fitState(
   messages: readonly Message[],
   calls: readonly ToolCall[],
-  options: Pick<ResolvedCompactOptions, 'maxStateTokens' | 'preserveRecentMessages' | 'goal'>,
+  options: Pick<ResolvedCompactOptions, 'maxStateTokens' | 'preserveRecentMessages' | 'goal'> &
+    Partial<Pick<ResolvedCompactOptions, 'instructions'>>,
 ): FittedState {
-  const goal = options.goal || goalFromMessages(messages);
+  const instructions = options.instructions?.trim();
+  const goal = [
+    options.goal || goalFromMessages(messages),
+    instructions ? `The user asked this compaction to keep: ${instructions}` : '',
+  ]
+    .filter((part) => part.length > 0)
+    .join('\n');
   const stateOf = (history: HistoryEntry[]): CompactionState => ({
     context: STATE_CONTEXT,
     goal,

@@ -153,6 +153,12 @@ describe('state fitting', () => {
     expect(state.goal).toContain('go ahead');
   });
 
+  it('adds the compaction instructions to the goal', () => {
+    const { state } = fitState(transcript(), [], { ...fit, instructions: ' the b.test.ts failure ' });
+    expect(state.goal).toBe('fix the test\nThe user asked this compaction to keep: the b.test.ts failure');
+    expect(fitState(transcript(), [], { ...fit, instructions: '  ' }).state.goal).toBe('fix the test');
+  });
+
   it('truncates tool inputs before touching message text', () => {
     const messages = [
       message('user', 'start'),

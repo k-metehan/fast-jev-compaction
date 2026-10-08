@@ -462,7 +462,9 @@ export function summarize(result: CompactResult): string {
       : '';
   return `${percent(reductionRatio(result))} reduction; ${
     parts.join(', ') || 'no tool calls'
-  }; state ~${stats.stateTokens} tokens (${stats.stateStage}) in ${stats.requests} request(s)${failed}`;
+  }; state ~${stats.stateTokens} tokens (${stats.stateStage}) in ${stats.requests} request(s)${
+    stats.requests === stats.batches ? '' : ` for ${stats.batches} batches`
+  }${failed}`;
 }
 
 const UI_LOG_MAX_CHARS = 4096;

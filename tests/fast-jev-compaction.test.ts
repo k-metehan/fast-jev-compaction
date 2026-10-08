@@ -570,6 +570,7 @@ describe('requests', () => {
     };
     const output = await compact(messages, jev.asker, { ...options, after });
     expect([...jev.attempts.values()]).toEqual([2, 2]);
+    expect(output.stats).toMatchObject({ batches: 2, requests: 4 });
     // The deadline timer, then one wait per retry.
     expect(waits).toEqual([45_000, RETRY_DELAY_MS, RETRY_DELAY_MS]);
     expect(output.stats).toMatchObject({ resultsDropped: 2, failedRequests: 0 });
@@ -652,6 +653,25 @@ describe('requests', () => {
     expect(jev.attempts.get('t1')).toBe(1);
     // The eight started before the abort; the last two never did.
     expect(jev.attempts.size).toBe(MAX_CONCURRENT_REQUESTS);
+  });
+
+  it('keeps the calls of a request answered malformed, and goes on with the rest', async () => {
+    const { messages, options } = oneCallPerRequest(3);
+    const asker: JevAsker = {
+      async ask(_state, questions) {
+        const keys = Object.keys(questions);
+        if (keys.includes('call_t2')) return { answers: { call_t2: { noul: 0.5 } } };
+        return { answers: Object.fromEntries(keys.map((k) => [k, { noul: k.startsWith('call_') ? 0.9 : 0.1 }])) };
+      },
+    };
+    const output = await compact(messages, asker, options);
+    expect(output.decisions.filter((d) => !d.reason.startsWith('pinned')).map((d) => [d.id, d.action])).toEqual([
+      ['t1', 'drop_result'],
+      ['t2', 'keep'],
+      ['t3', 'drop_result'],
+    ]);
+    expect(output.stats).toMatchObject({ batches: 3, requests: 3, failedRequests: 1 });
+    expect(output.stats.requestError).toMatch(/Invalid Jev answer/);
   });
 
   it('throws when no request is answered', async () => {

@@ -197,8 +197,11 @@ export interface CompactResult {
     stateTokens: number;
     /** Which fitting stage the state needed, '' when no request was made. */
     stateStage: string;
+    /** Question batches, each sent as one request (two when tried again). */
+    batches: number;
+    /** Jev HTTP requests made, retries included. */
     requests: number;
-    /** Requests that failed even when tried again; their calls were kept. */
+    /** Batches whose request failed, even when tried again; their calls were kept. */
     failedRequests: number;
     /** Why the first of them failed. */
     requestError?: string;

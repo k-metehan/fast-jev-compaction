@@ -447,9 +447,9 @@ function count(decisions: readonly CallDecision[], reason: CallDecision['reason'
  * unauthorized (401, 403) or unanswered stops the ones not yet started. The
  * calls of a request that fails are kept. Past `deadlineMs` (with `after`)
  * compact throws; when `signal` aborts it stops at once and throws
- * CompactionInterrupted. Throws when no request is answered,
- * Jev answers malformed, or the history cannot be fitted; the caller decides
- * whether to fall back.
+ * CompactionInterrupted. A malformed answer fails its request as an HTTP
+ * error does. Throws when no request is answered or the history cannot be
+ * fitted; the caller decides whether to fall back.
  */
 export async function compact(
   messages: readonly Message[],
@@ -475,6 +475,14 @@ export async function compact(
   let batches: ToolCall[][] = [];
   const answers = new Map<string, CallAnswer>();
   const failures: unknown[] = [];
+  // HTTP requests made, retries included.
+  let requests = 0;
+  const counted: JevAsker = {
+    ask: (state, questions) => {
+      requests += 1;
+      return asker.ask(state, questions);
+    },
+  };
   if (candidates.length > 0) {
     const state = fitState(messages, calls, resolved);
     fitted = state;
@@ -500,7 +508,7 @@ export async function compact(
     const work = settleLimited(batches, MAX_CONCURRENT_REQUESTS, async (batch) => {
       if (stop !== undefined) throw stop;
       try {
-        return await askWithRetry(asker, state.state, batch, wait, signal);
+        return await askWithRetry(counted, state.state, batch, wait, signal);
       } catch (error) {
         if (stopsAll(error)) stop ??= error;
         throw error;
@@ -564,7 +572,8 @@ export async function compact(
       carried: carried.length,
       stateTokens: fitted.tokens,
       stateStage: fitted.stage,
-      requests: batches.length,
+      batches: batches.length,
+      requests,
       failedRequests: failures.length,
       ...(failures.length > 0 && {
         requestError: failures[0] instanceof Error ? failures[0].message : String(failures[0]),

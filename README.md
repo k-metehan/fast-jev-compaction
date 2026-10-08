@@ -50,7 +50,8 @@ built-in compaction summary with the original messages.
    deadline (`deadlineMs`, 45 s, given a timer: `after`). A request that is rate
    limited (429) or hits a server error (5xx) is tried once more; one that is
    unauthorized (401, 403) or gets no answer is not, and no further request
-   starts. The calls of a failed request are kept (`stats.failedRequests`).
+   starts. A malformed answer fails its request like an HTTP error. The calls of
+   a failed request are kept (`stats.failedRequests`).
 6. Decisions per call, against `keepThreshold`:
    - `keepResult ≥ threshold` → keep call and result;
    - else `keepCall ≥ threshold` → keep the call, truncate the result to its
@@ -70,8 +71,9 @@ built-in compaction summary with the original messages.
    (`protected`). The Claude Code hook gives text only for the user's typed
    words, keeps the calls for anything else, and lets token countdowns go.
 
-A Jev failure on every request, malformed answers, a missing key, or a
-history that cannot be fitted throw; the caller (or the Claude Code hook) decides what to fall back to.
+Compaction throws when every request fails (malformed answers included), the
+key is missing, the history cannot be fitted, the deadline passes, or its
+`signal` aborts; the caller (or the Claude Code hook) decides what to fall back to.
 
 ## Install and usage
 
@@ -131,10 +133,12 @@ put it in a source file.
 | `attached` | none | Content kept beside tool results outside the messages (`{ toolUseIds, text? }`) |
 | `after` | `setTimeout` in `compactMessages`, none in `compact` | Timer for the retry wait and the deadline |
 | `deadlineMs` | `45000` | How long the Jev requests may take together before compaction throws (needs `after`) |
+| `signal` | none | Aborting it stops the compaction at once: no further request or retry (`CompactionInterrupted`) |
 
 `result.stats` reports message and character counts before and after, the
 per-reason decision counts, the state size in estimated tokens, which fitting
-stage was needed, and the number of requests.
+stage was needed, the number of question batches and of HTTP requests (retries
+included), and how many batches failed.
 
 ## Limitations
 
